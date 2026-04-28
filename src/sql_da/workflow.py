@@ -7,6 +7,7 @@ from pathlib import Path
 from sql_da.agent import run_agent_review
 from sql_da.agent_context import build_agent_virtual_context
 from sql_da.config import ProjectConfig
+from sql_da.data_quality import run_data_quality_checks
 from sql_da.lineage import LineageGraph
 from sql_da.models import AnalysisResult
 from sql_da.reports import write_report_artifacts
@@ -111,6 +112,25 @@ def analyze(
         metadata={"metrics": [finding.metric for finding in findings]},
     )
     _record_finding_research(trace, findings)
+    with (
+        reporter.status(f"Running data quality checks for {period}"),
+        trace.span(
+            "data_quality",
+            "sql-investigator",
+            "run data quality checks",
+            tool="run_data_quality_checks",
+            input_summary={"period": period},
+        ),
+    ):
+        data_quality_findings = run_data_quality_checks(config.database.path, period)
+    trace.record(
+        "data_quality",
+        "sql-investigator",
+        "summarize data quality findings",
+        output_summary=f"{len(data_quality_findings)} issue(s) found",
+        metadata={"issues": [finding.issue_id for finding in data_quality_findings]},
+    )
+    _record_data_quality_research(trace, data_quality_findings)
     toolkit = SQLAnalysisToolkit(
         config.database.path,
         lineage,
@@ -161,6 +181,7 @@ def analyze(
             config.model,
             toolkit,
             [finding.to_dict() for finding in findings],
+            [finding.to_dict() for finding in data_quality_findings],
             agent_context,
         )
     trace.record(
@@ -174,7 +195,13 @@ def analyze(
     trace.extend_agent_steps(review.research_steps)
     with reporter.status("Writing Markdown and JSON report artifacts"):
         report_path, evidence_path = write_report_artifacts(
-            config, resolved_run_id, period, compare_to, findings, review.content
+            config,
+            resolved_run_id,
+            period,
+            compare_to,
+            findings,
+            data_quality_findings,
+            review.content,
         )
         trace.record(
             "artifact",
@@ -202,6 +229,7 @@ def analyze(
         trace_json_path=str(Path(trace_json_path)),
         trace_csv_path=str(Path(trace_csv_path)),
         findings=findings,
+        data_quality_findings=data_quality_findings,
         agent_review=review.content,
     )
 
@@ -247,3 +275,22 @@ def _record_finding_research(trace: AgentTrace, findings: list) -> None:
                     "row_count": len(driver.rows),
                 },
             )
+
+
+def _record_data_quality_research(trace: AgentTrace, findings: list) -> None:
+    for finding in findings:
+        trace.record(
+            "data_quality",
+            "sql-investigator",
+            "inspect data quality issue",
+            tool=finding.check_name,
+            input_summary=f"{finding.table_name}: {finding.period}",
+            output_summary=(
+                f"{finding.issue_id}; rows={len(finding.rows)}; severity={finding.severity}"
+            ),
+            metadata={
+                "issue_id": finding.issue_id,
+                "table_name": finding.table_name,
+                "lineage_nodes": finding.lineage_nodes,
+            },
+        )

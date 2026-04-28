@@ -16,8 +16,9 @@ This agent analyzes month-over-month financial variances for a synthetic SaaS fi
 - Revenue variance is driven by Delta Bank launching ComplianceSuite, Acme expanding into Analytics, and Cloud Nine Labs churn.
 - COGS variance is driven by cloud usage for ComplianceSuite and Analytics.
 - Payroll variance is driven by Engineering and Sales headcount changes plus a G&A bonus.
-- Vendor expense variance is driven by a one-time ConsultCo ERP implementation invoice.
-- Net income variance should explain that revenue growth was outweighed by COGS, payroll, and vendor expense increases.
+- Seeded data quality issues are part of the scenario: a stale Cloud Nine Labs invoice after contract end, a duplicated ConsultCo vendor bill, and a missing March G&A payroll GL posting.
+- Vendor expense variance is driven by a duplicated ConsultCo ERP implementation invoice.
+- Net income variance should explain that revenue growth was outweighed by COGS, payroll, vendor expense increases, and March data quality issues.
 
 ## Evidence Standard
 
@@ -25,4 +26,4 @@ When reviewing a report:
 
 - Flag any explanation that is not directly supported by SQL rows.
 - Flag any metric driver that is mathematically unrelated to the metric.
-- Ask for better SQL evidence if headcount, bonus, churn, product mix, or one-time claims are only implied.
+- Ask for better SQL evidence if headcount, bonus, churn, product mix, duplicate invoice, stale invoice, missing GL, or one-time claims are only implied.

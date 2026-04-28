@@ -47,6 +47,26 @@ class VarianceFinding:
 
 
 @dataclass(frozen=True)
+class DataQualityFinding:
+    """A deterministic data quality issue with SQL evidence."""
+
+    issue_id: str
+    check_name: str
+    severity: str
+    table_name: str
+    period: str
+    description: str
+    business_impact: str
+    suggested_action: str
+    evidence_sql: str
+    rows: list[dict[str, Any]]
+    lineage_nodes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AnalysisResult:
     """Report output paths and finding payloads for a run."""
 
@@ -56,6 +76,7 @@ class AnalysisResult:
     trace_json_path: str
     trace_csv_path: str
     findings: list[VarianceFinding]
+    data_quality_findings: list[DataQualityFinding]
     agent_review: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,4 +88,5 @@ class AnalysisResult:
             "trace_csv_path": self.trace_csv_path,
             "agent_review": self.agent_review,
             "findings": [finding.to_dict() for finding in self.findings],
+            "data_quality_findings": [finding.to_dict() for finding in self.data_quality_findings],
         }

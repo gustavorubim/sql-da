@@ -28,6 +28,7 @@ class AgentUnavailable(RuntimeError):
 SYSTEM_PROMPT = """You are a finance variance analyst.
 Use lineage before writing root-cause claims. Use read-only SQL only.
 Every conclusion must cite the metric, relevant lineage nodes, and SQL evidence.
+Check data quality evidence before concluding a variance is purely business-driven.
 Do not invent tables, columns, customers, vendors, or accounting explanations."""
 
 SUBAGENTS = (
@@ -107,6 +108,12 @@ def create_variance_agent(
 
         return toolkit.as_json(toolkit.get_metric_drivers(metric, period, compare_to))
 
+    @tool
+    def get_data_quality_findings(period: str) -> str:
+        """Fetch deterministic data quality findings for one reporting period."""
+
+        return toolkit.as_json(toolkit.get_data_quality_findings(period))
+
     tools = [
         list_schema,
         run_read_only_sql,
@@ -114,6 +121,7 @@ def create_variance_agent(
         get_lineage_node,
         trace_upstream,
         get_metric_drivers,
+        get_data_quality_findings,
     ]
     skill_sources = list(agent_context.skill_sources) if agent_context else []
     memory_sources = list(agent_context.memory_sources) if agent_context else []
@@ -145,6 +153,7 @@ def run_agent_review(
     model: ModelConfig,
     toolkit: SQLAnalysisToolkit,
     findings: list[dict[str, Any]],
+    data_quality_findings: list[dict[str, Any]] | None = None,
     agent_context: AgentVirtualContext | None = None,
 ) -> AgentReview:
     """Run a live Deep Agent review when credentials are present; otherwise skip."""
@@ -161,9 +170,11 @@ def run_agent_review(
                     "role": "user",
                     "content": (
                         "Review these deterministic variance findings. "
+                        "Also review the deterministic data quality findings and call out "
+                        "whether any material variance may be data-quality driven. "
                         "Use available memory, skills, and subagents where appropriate. "
                         "Identify unsupported claims and suggest concise improvements.\n"
-                        f"{json.dumps(findings, indent=2)}"
+                        f"{json.dumps(_review_payload(findings, data_quality_findings), indent=2)}"
                     ),
                 }
             ]
@@ -180,6 +191,16 @@ def run_agent_review(
         content=_extract_agent_text(response),
         research_steps=_extract_agent_research_steps(response),
     )
+
+
+def _review_payload(
+    findings: list[dict[str, Any]],
+    data_quality_findings: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    return {
+        "findings": findings,
+        "data_quality_findings": data_quality_findings or [],
+    }
 
 
 def _extract_agent_text(response: Any) -> str:

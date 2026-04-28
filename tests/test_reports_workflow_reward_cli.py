@@ -24,7 +24,7 @@ def _config() -> ProjectConfig:
 def test_workflow_writes_markdown_and_json(monkeypatch):
     config = _config()
     init_demo_database(config)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
 
     result = analyze(config, "2026-03", "2026-02", run_id="pytest_report")
 
@@ -41,9 +41,17 @@ def test_workflow_writes_markdown_and_json(monkeypatch):
     assert trace_csv.exists()
     assert result.to_dict()["run_id"] == "pytest_report"
     assert result.to_dict()["trace_csv_path"] == str(trace_csv)
-    assert "Financial Variance Root-Cause Report" in report.read_text(encoding="utf-8")
+    report_text = report.read_text(encoding="utf-8")
+    assert "Financial Variance Root-Cause Report" in report_text
+    assert "Data Quality Findings" in report_text
     assert payload["findings"][0]["drivers"]
+    assert {finding["issue_id"] for finding in payload["data_quality_findings"]} == {
+        "invoice_after_contract_end",
+        "duplicate_vendor_bill",
+        "missing_gl_entry",
+    }
     assert any(event["phase"] == "driver_research" for event in trace_payload)
+    assert any(event["phase"] == "data_quality" for event in trace_payload)
     with trace_csv.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["sequence"] == "1"
@@ -53,17 +61,18 @@ def test_workflow_writes_markdown_and_json(monkeypatch):
 
 def test_report_renderer_handles_empty_findings():
     config = _config()
-    payload = evidence_payload(config, "empty", "2026-03", "2026-02", [], "no review")
+    payload = evidence_payload(config, "empty", "2026-03", "2026-02", [], [], "no review")
 
     markdown = render_markdown(payload)
 
     assert "No material variances" in markdown
+    assert "No data quality findings" in markdown
     assert "no review" in markdown
 
 
 def test_report_renderer_handles_finding_without_driver_rows():
     config = _config()
-    payload = evidence_payload(config, "manual", "2026-03", "2026-02", [], "review")
+    payload = evidence_payload(config, "manual", "2026-03", "2026-02", [], [], "review")
     payload["findings"] = [
         {
             "metric": "manual_metric",
@@ -84,7 +93,7 @@ def test_report_renderer_handles_finding_without_driver_rows():
 
 
 def test_reward_internal_checks_pass_without_quality_gates(monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
     config = _config()
 
     payload = run_reward(config, include_quality_gates=False)
@@ -96,6 +105,7 @@ def test_reward_internal_checks_pass_without_quality_gates(monkeypatch):
         "demo_db_builds",
         "lineage_validates",
         "known_variance_drivers_detected",
+        "known_data_quality_issues_detected",
         "sql_safety_blocks_mutation",
         "report_artifacts_have_evidence",
     }
@@ -156,7 +166,7 @@ def test_reward_quality_gate_branch_and_keyword_failures(monkeypatch):
 
 
 def test_workflow_initializes_missing_db_and_rejects_bad_lineage(tmp_path, monkeypatch):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
     config = _config()
     if config.database.path.exists():
         config.database.path.unlink()
@@ -187,7 +197,7 @@ report_dir: {tmp_path / "reports"}
 
 
 def test_cli_commands(monkeypatch, capsys):
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
 
     assert main(["init-demo-db", "--config", str(ROOT / "configs/demo.yaml")]) == 0
     assert '"created": true' in capsys.readouterr().out
@@ -219,6 +229,7 @@ def test_cli_commands(monkeypatch, capsys):
     analyze_output = capsys.readouterr().out
     assert '"run_id": "cli_test"' in analyze_output
     assert '"trace_json_path":' in analyze_output
+    assert '"data_quality_findings":' in analyze_output
 
     assert (
         main(

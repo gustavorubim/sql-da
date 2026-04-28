@@ -67,14 +67,16 @@ def test_analysis_toolkit_exposes_schema_lineage_and_variances():
 
     summary = toolkit.get_variance_summary("2026-03", "2026-02")
     drivers = toolkit.get_metric_drivers("vendor_expense", "2026-03", "2026-02")
+    data_quality = toolkit.get_data_quality_findings("2026-03")
 
     assert any(item["metric"] == "revenue" for item in summary)
     assert drivers[0]["label"].startswith("ConsultCo")
+    assert any(item["issue_id"] == "duplicate_vendor_bill" for item in data_quality)
 
 
 def test_agent_review_skips_without_key(monkeypatch):
     toolkit = _toolkit()
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
 
     review = run_agent_review(ModelConfig(enable_live_agent=True), toolkit, [])
 
@@ -131,6 +133,7 @@ def test_agent_review_uses_fake_agent_when_key_present(monkeypatch):
         ModelConfig(enable_live_agent=True),
         toolkit,
         [{"metric": "revenue"}],
+        [{"issue_id": "duplicate_vendor_bill"}],
         context,
     )
 

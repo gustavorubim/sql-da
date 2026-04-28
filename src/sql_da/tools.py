@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from sql_da.data_quality import run_data_quality_checks
 from sql_da.lineage import LineageGraph
 from sql_da.sql_safety import ReadOnlySQLRunner
 from sql_da.variance import compute_variances, get_metric_drivers
@@ -71,6 +72,9 @@ class SQLAnalysisToolkit:
             driver.to_dict()
             for driver in get_metric_drivers(self.db_path, metric, period, compare_to, lineage_path)
         ]
+
+    def get_data_quality_findings(self, period: str) -> list[dict[str, Any]]:
+        return [finding.to_dict() for finding in run_data_quality_checks(self.db_path, period)]
 
     def as_json(self, payload: Any) -> str:
         return json.dumps(payload, indent=2, sort_keys=True)

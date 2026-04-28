@@ -31,6 +31,7 @@ def init_demo_database(config_or_path: ProjectConfig | str | Path, replace: bool
             _seed_bills_payroll_and_gl(conn)
             _create_views(conn)
             _seed_expected_drivers(conn)
+            _seed_expected_data_quality_issues(conn)
     return db_path
 
 
@@ -48,6 +49,7 @@ def table_counts(db_path: Path) -> dict[str, int]:
         "payroll_runs",
         "gl_entries",
         "expected_variance_drivers",
+        "expected_data_quality_issues",
     )
     with closing(sqlite3.connect(db_path)) as conn:
         return {
@@ -140,6 +142,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             min_abs_variance REAL NOT NULL,
             PRIMARY KEY (metric, period, compare_to)
         );
+        CREATE TABLE expected_data_quality_issues (
+            issue_id TEXT PRIMARY KEY,
+            check_name TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            period TEXT NOT NULL,
+            expected_description TEXT NOT NULL,
+            expected_keywords TEXT NOT NULL
+        );
         """
     )
 
@@ -205,6 +216,7 @@ def _seed_contracts_and_invoices(conn: sqlite3.Connection) -> None:
                 (invoice_id, month, customer_id, product_id, contract_id, amount, quantity)
             )
             invoice_id += 1
+    invoice_rows.append((invoice_id, "2026-03", 3, 4, 3, 18000.0, 30))
     conn.executemany("INSERT INTO invoices VALUES (?, ?, ?, ?, ?, ?, ?)", invoice_rows)
 
 
@@ -250,6 +262,9 @@ def _base_vendor_bills(
     if month == "2026-03":
         rows.append(
             (start_id + 2, month, "ConsultCo", 3, 6300, 35000.0, "ERP implementation kickoff")
+        )
+        rows.append(
+            (start_id + 3, month, "ConsultCo", 3, 6300, 35000.0, "ERP implementation kickoff")
         )
     return rows
 
@@ -303,6 +318,8 @@ def _seed_gl_entries(conn: sqlite3.Connection) -> None:
         )
         entry_id += 1
     for row in conn.execute("SELECT * FROM payroll_runs ORDER BY payroll_id").fetchall():
+        if row["pay_month"] == "2026-03" and row["department_id"] == 3:
+            continue
         gl_rows.append(
             (
                 entry_id,
@@ -406,8 +423,9 @@ def _seed_expected_drivers(conn: sqlite3.Connection) -> None:
             "2026-03",
             "2026-02",
             "Revenue increased because Delta Bank launched ComplianceSuite and Acme Corp "
-            "expanded into Analytics, more than offsetting Cloud Nine Labs churn.",
-            "Delta Bank,Acme Corp,Cloud Nine Labs,ComplianceSuite,Analytics",
+            "expanded into Analytics, but the amount is overstated by a stale Cloud Nine Labs "
+            "Support invoice after its contract ended.",
+            "Delta Bank,Acme Corp,Cloud Nine Labs,ComplianceSuite,Analytics,stale,invoice",
             50000.0,
         ),
         (
@@ -415,8 +433,9 @@ def _seed_expected_drivers(conn: sqlite3.Connection) -> None:
             "2026-03",
             "2026-02",
             "COGS increased with the new ComplianceSuite workload and higher cloud usage "
-            "from the March enterprise expansion.",
-            "ComplianceSuite,cloud usage",
+            "from the March enterprise expansion, plus cloud COGS from the stale Cloud Nine "
+            "Labs Support invoice.",
+            "ComplianceSuite,cloud usage,Cloud Nine Labs,stale,invoice",
             15000.0,
         ),
         (
@@ -424,8 +443,9 @@ def _seed_expected_drivers(conn: sqlite3.Connection) -> None:
             "2026-03",
             "2026-02",
             "Gross margin rose in dollars, but ComplianceSuite introduced a lower-margin "
-            "revenue mix that increased COGS.",
-            "ComplianceSuite,revenue,cogs",
+            "revenue mix that increased COGS and the stale Cloud Nine Labs invoice "
+            "overstated revenue.",
+            "ComplianceSuite,revenue,cogs,Cloud Nine Labs,stale,invoice",
             30000.0,
         ),
         (
@@ -441,9 +461,9 @@ def _seed_expected_drivers(conn: sqlite3.Connection) -> None:
             "vendor_expense",
             "2026-03",
             "2026-02",
-            "Vendor expense increased because ConsultCo billed a one-time ERP "
-            "implementation kickoff invoice.",
-            "ConsultCo,ERP implementation",
+            "Vendor expense increased because the ConsultCo ERP implementation kickoff "
+            "invoice was duplicated in the March load.",
+            "ConsultCo,ERP implementation,duplicate",
             30000.0,
         ),
         (
@@ -451,8 +471,8 @@ def _seed_expected_drivers(conn: sqlite3.Connection) -> None:
             "2026-03",
             "2026-02",
             "Operating expense increased from March payroll headcount growth plus the "
-            "one-time ConsultCo implementation invoice.",
-            "headcount,ConsultCo,payroll",
+            "duplicated ConsultCo implementation invoice.",
+            "headcount,ConsultCo,payroll,duplicate",
             70000.0,
         ),
         (
@@ -460,9 +480,43 @@ def _seed_expected_drivers(conn: sqlite3.Connection) -> None:
             "2026-03",
             "2026-02",
             "Net income declined because revenue growth was outweighed by higher COGS, "
-            "payroll, and the ConsultCo implementation invoice.",
-            "revenue,cogs,payroll,ConsultCo",
+            "payroll, the duplicated ConsultCo implementation invoice, and data quality "
+            "issues in March source data.",
+            "revenue,cogs,payroll,ConsultCo,duplicate,data quality",
             30000.0,
         ),
     ]
     conn.executemany("INSERT INTO expected_variance_drivers VALUES (?, ?, ?, ?, ?, ?)", rows)
+
+
+def _seed_expected_data_quality_issues(conn: sqlite3.Connection) -> None:
+    rows = [
+        (
+            "invoice_after_contract_end",
+            "invoice_after_contract_end",
+            "high",
+            "invoices",
+            "2026-03",
+            "Cloud Nine Labs has a March Support invoice after its contract ended in February.",
+            "Cloud Nine Labs,Support,contract,end",
+        ),
+        (
+            "duplicate_vendor_bill",
+            "duplicate_vendor_bill",
+            "high",
+            "vendor_bills",
+            "2026-03",
+            "ConsultCo's ERP implementation kickoff invoice was loaded twice in March.",
+            "ConsultCo,duplicate,ERP implementation",
+        ),
+        (
+            "missing_gl_entry",
+            "missing_gl_entry",
+            "medium",
+            "gl_entries",
+            "2026-03",
+            "The March G&A payroll run is missing its corresponding GL entry.",
+            "payroll,G&A,missing GL",
+        ),
+    ]
+    conn.executemany("INSERT INTO expected_data_quality_issues VALUES (?, ?, ?, ?, ?, ?, ?)", rows)

@@ -87,6 +87,18 @@ nodes:
       - product_id
       - product_name
       - gross_margin_profile
+  expected_data_quality_issues:
+    type: metadata_table
+    grain: one row per seeded data quality issue
+    description: Expected data quality defects used by tests and reward verification.
+    columns:
+      - issue_id
+      - check_name
+      - severity
+      - table_name
+      - period
+      - expected_description
+      - expected_keywords
   mart_revenue_monthly:
     type: mart_view
     grain: one row per month

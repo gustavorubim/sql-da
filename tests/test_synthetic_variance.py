@@ -3,6 +3,7 @@ from contextlib import closing
 from pathlib import Path
 
 from sql_da.config import ProjectConfig
+from sql_da.data_quality import expected_data_quality_rows, run_data_quality_checks
 from sql_da.lineage import LineageGraph
 from sql_da.synthetic import init_demo_database, table_counts
 from sql_da.variance import (
@@ -24,7 +25,9 @@ def test_demo_database_builds_known_financials():
     db_path = init_demo_database(config)
 
     counts = table_counts(db_path)
-    assert counts["invoices"] > 20
+    assert counts["invoices"] == 29
+    assert counts["vendor_bills"] == 33
+    assert counts["expected_data_quality_issues"] == 3
     assert counts["gl_entries"] > counts["invoices"]
 
     with closing(sqlite3.connect(db_path)) as conn:
@@ -34,12 +37,12 @@ def test_demo_database_builds_known_financials():
             ).fetchall()
         )
 
-    assert rows["revenue"] == 199000.0
-    assert rows["cogs"] == 48400.0
-    assert rows["gross_margin"] == 150600.0
+    assert rows["revenue"] == 217000.0
+    assert rows["cogs"] == 50560.0
+    assert rows["gross_margin"] == 166440.0
     assert rows["payroll_expense"] == 202000.0
-    assert rows["vendor_expense"] == 55000.0
-    assert rows["net_income"] == -106400.0
+    assert rows["vendor_expense"] == 90000.0
+    assert rows["net_income"] == -125560.0
     assert init_demo_database(config.database.path, replace=True) == config.database.path
 
 
@@ -60,11 +63,13 @@ def test_compute_variances_detects_seeded_root_causes():
     by_metric = {finding.metric: finding for finding in findings}
 
     assert set(by_metric) == set(config.analysis.metrics)
-    assert by_metric["revenue"].absolute_variance == 57000.0
+    assert by_metric["revenue"].absolute_variance == 75000.0
     assert "Delta Bank" in by_metric["revenue"].root_cause
-    assert by_metric["cogs"].absolute_variance == 19840.0
-    assert by_metric["net_income"].absolute_variance == -36840.0
+    assert "stale Cloud Nine Labs" in by_metric["revenue"].root_cause
+    assert by_metric["cogs"].absolute_variance == 22000.0
+    assert by_metric["net_income"].absolute_variance == -56000.0
     assert by_metric["vendor_expense"].drivers[0].label.startswith("ConsultCo")
+    assert by_metric["vendor_expense"].drivers[0].variance == 70000.0
     assert by_metric["operating_expense"].drivers[0].label == "Engineering"
     assert by_metric["operating_expense"].drivers[0].rows[0]["headcount_variance"] == 2
     assert by_metric["revenue"].lineage_path[0] == "mart_revenue_monthly"
@@ -143,3 +148,22 @@ def test_expected_driver_metadata_is_available():
 
     assert {row["metric"] for row in expected} == set(config.analysis.metrics)
     assert any("ConsultCo" in row["expected_keywords"] for row in expected)
+
+
+def test_data_quality_checks_detect_seeded_issues():
+    config = _config()
+    db_path = init_demo_database(config)
+
+    findings = run_data_quality_checks(db_path, "2026-03")
+    expected = expected_data_quality_rows(db_path, "2026-03")
+    by_issue = {finding.issue_id: finding for finding in findings}
+
+    assert set(by_issue) == {
+        "invoice_after_contract_end",
+        "duplicate_vendor_bill",
+        "missing_gl_entry",
+    }
+    assert {row["issue_id"] for row in expected} == set(by_issue)
+    assert by_issue["invoice_after_contract_end"].rows[0]["customer_name"] == "Cloud Nine Labs"
+    assert by_issue["duplicate_vendor_bill"].rows[0]["potential_overstatement"] == 35000.0
+    assert by_issue["missing_gl_entry"].rows[0]["department_name"] == "G&A"

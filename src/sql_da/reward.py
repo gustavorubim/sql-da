@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sql_da.config import ProjectConfig
+from sql_da.data_quality import expected_data_quality_rows, run_data_quality_checks
 from sql_da.lineage import LineageGraph
 from sql_da.sql_safety import ReadOnlySQLRunner, SQLSafetyError
 from sql_da.synthetic import init_demo_database, table_counts
@@ -64,7 +65,7 @@ def run_internal_checks(
 
     reporter = reporter or TerminalReporter()
     checks: list[RewardCheck] = []
-    reporter.stage("[1/5] Rebuilding demo database")
+    reporter.stage("[1/6] Rebuilding demo database")
     db_path = init_demo_database(config)
     counts = table_counts(db_path)
     checks.append(
@@ -75,14 +76,14 @@ def run_internal_checks(
         )
     )
 
-    reporter.stage("[2/5] Validating lineage")
+    reporter.stage("[2/6] Validating lineage")
     lineage = LineageGraph.from_yaml(config.lineage_path)
     lineage_errors = lineage.validate()
     checks.append(
         RewardCheck("lineage_validates", not lineage_errors, "; ".join(lineage_errors) or "ok")
     )
 
-    reporter.stage("[3/5] Checking seeded variance drivers")
+    reporter.stage("[3/6] Checking seeded variance drivers")
     findings = compute_variances(
         db_path,
         "2026-03",
@@ -104,7 +105,22 @@ def run_internal_checks(
         )
     )
 
-    reporter.stage("[4/5] Checking SQL mutation guard")
+    reporter.stage("[4/6] Checking seeded data quality issues")
+    expected_dq = {row["issue_id"]: row for row in expected_data_quality_rows(db_path, "2026-03")}
+    detected_dq = {
+        finding.issue_id: finding for finding in run_data_quality_checks(db_path, "2026-03")
+    }
+    missing_dq = sorted(set(expected_dq) - set(detected_dq))
+    dq_keyword_failures = _data_quality_keyword_failures(detected_dq, expected_dq)
+    checks.append(
+        RewardCheck(
+            "known_data_quality_issues_detected",
+            not missing_dq and not dq_keyword_failures,
+            f"missing={missing_dq}; keyword_failures={dq_keyword_failures}",
+        )
+    )
+
+    reporter.stage("[5/6] Checking SQL mutation guard")
     runner = ReadOnlySQLRunner(db_path)
     try:
         runner.run("DROP TABLE invoices")
@@ -113,7 +129,7 @@ def run_internal_checks(
         sql_blocked = True
     checks.append(RewardCheck("sql_safety_blocks_mutation", sql_blocked, "DROP TABLE was blocked"))
 
-    reporter.stage("[5/5] Checking report artifacts")
+    reporter.stage("[6/6] Checking report artifacts")
     result = analyze(config, "2026-03", "2026-02", run_id="reward_demo", reporter=reporter)
     evidence = json.loads(Path(result.evidence_path).read_text(encoding="utf-8"))
     every_finding_has_evidence = all(
@@ -123,10 +139,19 @@ def run_internal_checks(
     trace_paths_exist = (
         Path(result.trace_json_path).exists() and Path(result.trace_csv_path).exists()
     )
+    report_has_data_quality_evidence = all(
+        finding["rows"] and finding["lineage_nodes"]
+        for finding in evidence["data_quality_findings"]
+    )
     checks.append(
         RewardCheck(
             "report_artifacts_have_evidence",
-            every_finding_has_evidence and Path(result.report_path).exists() and trace_paths_exist,
+            (
+                every_finding_has_evidence
+                and report_has_data_quality_evidence
+                and Path(result.report_path).exists()
+                and trace_paths_exist
+            ),
             (
                 f"report={result.report_path}; evidence={result.evidence_path}; "
                 f"trace_json={result.trace_json_path}; trace_csv={result.trace_csv_path}"
@@ -185,4 +210,33 @@ def _keyword_failures(
         ]
         if missing_terms:
             failures[metric] = missing_terms
+    return failures
+
+
+def _data_quality_keyword_failures(
+    detected: dict[str, Any],
+    expected: dict[str, dict[str, Any]],
+) -> dict[str, list[str]]:
+    failures: dict[str, list[str]] = {}
+    for issue_id, row in expected.items():
+        finding = detected.get(issue_id)
+        if finding is None:
+            continue
+        text = " ".join(
+            [
+                finding.description,
+                finding.check_name,
+                finding.table_name,
+                finding.business_impact,
+                finding.suggested_action,
+                *[str(value) for evidence_row in finding.rows for value in evidence_row.values()],
+            ]
+        ).casefold()
+        missing_terms = [
+            keyword.strip()
+            for keyword in str(row["expected_keywords"]).split(",")
+            if keyword.strip().casefold() not in text
+        ]
+        if missing_terms:
+            failures[issue_id] = missing_terms
     return failures
