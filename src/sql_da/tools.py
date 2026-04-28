@@ -54,6 +54,15 @@ class SQLAnalysisToolkit:
     def trace_upstream(self, node_id: str) -> list[str]:
         return self.lineage.trace_upstream(node_id)
 
+    def list_relationship_specs(self) -> list[dict[str, str]]:
+        return self.lineage.list_relationship_specs()
+
+    def list_transformation_specs(self, node_id: str = "") -> list[dict[str, Any]]:
+        return self.lineage.list_transformation_specs(node_id or None)
+
+    def get_semantic_specs(self) -> dict[str, Any]:
+        return self.lineage.semantic_specs()
+
     def get_variance_summary(self, period: str, compare_to: str) -> list[dict[str, Any]]:
         findings = compute_variances(
             self.db_path,

@@ -75,6 +75,15 @@ def test_analysis_toolkit_exposes_schema_lineage_and_variances():
     assert any(node["node_id"] == "invoices" for node in toolkit.list_lineage_nodes())
     assert toolkit.get_lineage_node("mart_revenue_monthly")["type"] == "mart_view"
     assert "invoices" in toolkit.trace_upstream("mart_revenue_monthly")
+    assert any(
+        relationship["relationship_id"] == "invoice_product"
+        for relationship in toolkit.list_relationship_specs()
+    )
+    assert any(
+        transformation["transformation_id"] == "cloud_cogs_bill_amount"
+        for transformation in toolkit.list_transformation_specs("products")
+    )
+    assert "relationships" in toolkit.get_semantic_specs()
     assert "lineage" not in toolkit.as_json({"lineage": []}).casefold().replace("lineage", "")
 
     summary = toolkit.get_variance_summary("2026-03", "2026-02")
@@ -167,6 +176,10 @@ def test_gemini_model_kwargs_and_agent_creation(monkeypatch):
     assert create_variance_agent(model, toolkit) == "agent"
     assert captured["chat_kwargs"] == chat_google_genai_kwargs(model)
     assert captured["deep_agent_kwargs"]["model"].__class__ is FakeChatGoogleGenerativeAI
+    tool_names = {tool.name for tool in captured["deep_agent_kwargs"]["tools"]}
+    assert {"list_relationship_specs", "list_transformation_specs", "get_semantic_specs"} <= (
+        tool_names
+    )
 
 
 def test_agent_review_uses_fake_agent_when_key_present(monkeypatch):
@@ -178,6 +191,8 @@ def test_agent_review_uses_fake_agent_when_key_present(monkeypatch):
         def invoke(self, payload):
             assert "messages" in payload
             assert "/memory/AGENTS.md" in payload["files"]
+            assert '"semantic_specs"' in payload["messages"][0]["content"]
+            assert "cloud_cogs_bill_amount" in payload["messages"][0]["content"]
             return {
                 "messages": [
                     {

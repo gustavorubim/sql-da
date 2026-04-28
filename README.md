@@ -120,6 +120,10 @@ For the default March-vs-February demo, the mart values look like this:
 
 `configs/lineage.yaml` describes the graph from raw tables to mart views, including node type, grain, columns, upstream dependencies, and metric mappings. For example, `revenue` maps to `mart_revenue_monthly`, which traces back through `invoices`, `customer_contracts`, `customers`, and `products`. `net_income` maps to `mart_financials_monthly`, which traces through the revenue, COGS, payroll, and vendor-spend marts.
 
+The same YAML file also contains semantic specs for general database adaptation. `relationships` documents joins and cardinality, such as `invoices.product_id -> products.product_id`. `transformations` documents formulas, aggregations, filters, and generated fields, such as `ROUND(SUM(invoices.amount) * products.cogs_rate, 2)` for synthetic CloudCo COGS bills. These specs are validated against configured nodes and columns, exposed through agent tools, and included in the live review payload so the model can use configured business logic instead of guessing joins or formulas from table names.
+
+For a step-by-step adaptation guide for other SQLite databases, see `general_migration.md`.
+
 The seeded March 2026 stories are:
 
 | Driver | Where It Appears |
@@ -134,7 +138,7 @@ The seeded March 2026 stories are:
 | Data-quality vendor overstatement | ConsultCo's ERP implementation kickoff bill is loaded twice in March |
 | Data-quality reconciliation gap | The March G&A payroll run is missing a GL entry |
 
-The agent does not need to guess these from text. The deterministic analysis first computes material metric variances, driver rows, and data-quality findings with SQL. The Deep Agent then receives tools for schema inspection, read-only SQL, lineage traversal, variance summaries, driver rows, data-quality findings, and report rendering so it can explain the root cause with cited evidence.
+The agent does not need to guess these from text. The deterministic analysis first computes material metric variances, driver rows, and data-quality findings with SQL. The Deep Agent then receives tools for schema inspection, read-only SQL, lineage traversal, relationship specs, transformation specs, variance summaries, driver rows, data-quality findings, and report rendering so it can explain the root cause with cited evidence.
 
 ### Data Quality Checks
 

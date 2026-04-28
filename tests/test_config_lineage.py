@@ -162,6 +162,24 @@ def test_lineage_validates_and_traces_metrics():
     assert graph.trace_metric("net_income")[0] == "mart_financials_monthly"
     assert "invoices" in graph.trace_metric("revenue")
     assert any(node["node_id"] == "gl_entries" for node in graph.list_nodes())
+    relationships = graph.list_relationship_specs()
+    transformations = graph.list_transformation_specs()
+    product_transformations = graph.list_transformation_specs("products")
+    semantic_specs = graph.semantic_specs()
+
+    assert any(
+        relationship["relationship_id"] == "invoice_product" for relationship in relationships
+    )
+    assert any(
+        transformation["transformation_id"] == "cloud_cogs_bill_amount"
+        and "products.cogs_rate" in transformation["inputs"]
+        for transformation in transformations
+    )
+    assert [transformation["transformation_id"] for transformation in product_transformations] == [
+        "cloud_cogs_bill_amount"
+    ]
+    assert semantic_specs["relationships"] == relationships
+    assert semantic_specs["transformations"] == transformations
 
 
 def test_lineage_reports_bad_references(tmp_path):
@@ -191,3 +209,77 @@ metric_mappings:
         graph.trace_upstream("missing")
     with pytest.raises(KeyError):
         graph.trace_metric("missing_metric")
+
+
+def test_lineage_reports_bad_relationship_and_transformation_specs(tmp_path):
+    lineage_path = tmp_path / "lineage.yaml"
+    lineage_path.write_text(
+        """
+nodes:
+  invoices:
+    type: raw_table
+    grain: one row
+    columns: [invoice_id, amount]
+  products:
+    type: dimension
+    grain: one row
+    columns: [product_id]
+relationships:
+  bad_join:
+    left: invoices.missing_column
+    right: missing_node.product_id
+transformations:
+  bad_transform:
+    output: products.missing_output
+    expression: SUM(invoices.amount)
+    source_nodes: [missing_node]
+    inputs:
+      - invoices.amount
+      - missing_node.amount
+""",
+        encoding="utf-8",
+    )
+
+    errors = LineageGraph.from_yaml(lineage_path).validate()
+
+    assert "relationship bad_join left invoices.missing_column references missing column" in (
+        "; ".join(errors)
+    )
+    assert "relationship bad_join right missing_node.product_id does not match a known node" in (
+        "; ".join(errors)
+    )
+    assert (
+        "transformation bad_transform output products.missing_output references missing column"
+        in ("; ".join(errors))
+    )
+    assert "transformation bad_transform references missing source node missing_node" in errors
+    assert (
+        "transformation bad_transform reference missing_node.amount does not match a known node"
+        in ("; ".join(errors))
+    )
+
+
+def test_lineage_rejects_malformed_spec_sections(tmp_path):
+    lineage_path = tmp_path / "lineage.yaml"
+    lineage_path.write_text(
+        """
+nodes: {}
+relationships: not-a-mapping
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="relationships must be a mapping or list"):
+        LineageGraph.from_yaml(lineage_path)
+
+    lineage_path.write_text(
+        """
+nodes: {}
+transformations:
+  - output: x.y
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"transformations\[1\] is missing id"):
+        LineageGraph.from_yaml(lineage_path)

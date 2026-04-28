@@ -30,6 +30,7 @@ class AgentUnavailable(RuntimeError):
 
 SYSTEM_PROMPT = """You are a finance variance analyst.
 Use lineage before writing root-cause claims. Use read-only SQL only.
+Use configured relationship and transformation specs before inferring joins, summaries, or formulas.
 Every conclusion must cite the metric, relevant lineage nodes, and SQL evidence.
 Check data quality evidence before concluding a variance is purely business-driven.
 Do not invent tables, columns, customers, vendors, or accounting explanations."""
@@ -126,6 +127,24 @@ def create_variance_agent(
         return toolkit.as_json(toolkit.trace_upstream(node_id))
 
     @tool
+    def list_relationship_specs() -> str:
+        """List configured join and relationship specs from lineage YAML."""
+
+        return toolkit.as_json(toolkit.list_relationship_specs())
+
+    @tool
+    def list_transformation_specs(node_id: str = "") -> str:
+        """List configured transformation specs, optionally filtered by lineage node."""
+
+        return toolkit.as_json(toolkit.list_transformation_specs(node_id))
+
+    @tool
+    def get_semantic_specs() -> str:
+        """Fetch all configured relationship and transformation specs."""
+
+        return toolkit.as_json(toolkit.get_semantic_specs())
+
+    @tool
     def get_metric_drivers(metric: str, period: str, compare_to: str) -> str:
         """Fetch deterministic driver rows for one metric variance."""
 
@@ -143,6 +162,9 @@ def create_variance_agent(
         list_lineage_nodes,
         get_lineage_node,
         trace_upstream,
+        list_relationship_specs,
+        list_transformation_specs,
+        get_semantic_specs,
         get_metric_drivers,
         get_data_quality_findings,
     ]
@@ -200,6 +222,11 @@ def run_agent_review(
         )
     try:
         agent = create_variance_agent(model, toolkit, agent_context)
+        review_payload = _review_payload(
+            findings,
+            data_quality_findings,
+            toolkit.get_semantic_specs(),
+        )
         payload: dict[str, Any] = {
             "messages": [
                 {
@@ -210,7 +237,7 @@ def run_agent_review(
                         "whether any material variance may be data-quality driven. "
                         "Use available memory, skills, and subagents where appropriate. "
                         "Identify unsupported claims and suggest concise improvements.\n"
-                        f"{json.dumps(_review_payload(findings, data_quality_findings), indent=2)}"
+                        f"{json.dumps(review_payload, indent=2)}"
                     ),
                 }
             ]
@@ -241,10 +268,12 @@ def run_agent_review(
 def _review_payload(
     findings: list[dict[str, Any]],
     data_quality_findings: list[dict[str, Any]] | None,
+    semantic_specs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "findings": findings,
         "data_quality_findings": data_quality_findings or [],
+        "semantic_specs": semantic_specs or {},
     }
 
 
