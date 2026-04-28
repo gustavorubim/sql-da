@@ -160,16 +160,35 @@ def test_lineage_validates_and_traces_metrics():
 
     assert graph.validate() == []
     assert graph.trace_metric("net_income")[0] == "mart_financials_monthly"
+    assert graph.trace_metric("Net Income")[0] == "mart_financials_monthly"
     assert "invoices" in graph.trace_metric("revenue")
+    assert graph.trace_upstream("mart_financials_monthly", max_depth=1) == [
+        "mart_financials_monthly",
+        "mart_revenue_monthly",
+        "mart_cogs_monthly",
+        "mart_payroll_monthly",
+        "mart_vendor_spend_monthly",
+    ]
     assert any(node["node_id"] == "gl_entries" for node in graph.list_nodes())
     relationships = graph.list_relationship_specs()
+    product_relationships = graph.list_relationship_specs("products", limit=1)
     transformations = graph.list_transformation_specs()
     product_transformations = graph.list_transformation_specs("products")
     semantic_specs = graph.semantic_specs()
+    semantic_summary = graph.semantic_summary()
+    search_results = graph.search_semantic_specs("cogs rate product", limit=2)
+    product_context = graph.get_node_context("products", limit=2)
 
     assert any(
         relationship["relationship_id"] == "invoice_product" for relationship in relationships
     )
+    assert product_relationships == [
+        next(
+            relationship
+            for relationship in relationships
+            if relationship["relationship_id"] == "invoice_product"
+        )
+    ]
     assert any(
         transformation["transformation_id"] == "cloud_cogs_bill_amount"
         and "products.cogs_rate" in transformation["inputs"]
@@ -180,6 +199,13 @@ def test_lineage_validates_and_traces_metrics():
     ]
     assert semantic_specs["relationships"] == relationships
     assert semantic_specs["transformations"] == transformations
+    assert semantic_summary["relationship_count"] == len(relationships)
+    assert semantic_summary["transformation_count"] == len(transformations)
+    assert "retrieve" in semantic_summary["retrieval_guidance"]
+    assert search_results[0]["id"] == "cloud_cogs_bill_amount"
+    assert product_context["node"]["node_id"] == "products"
+    assert len(product_context["relationships"]) == 2
+    assert product_context["transformations"][0]["transformation_id"] == "cloud_cogs_bill_amount"
 
 
 def test_lineage_reports_bad_references(tmp_path):

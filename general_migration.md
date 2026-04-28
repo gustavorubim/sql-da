@@ -147,13 +147,14 @@ transformations:
       - fact_order_cost.cost_type = 'shipping'
 ```
 
-The model receives these specs through the review payload and through tools:
+The model receives compact semantic counts in the review payload and retrieves details through bounded tools:
 
+- `search_semantic_specs`
+- `get_node_context`
 - `list_relationship_specs`
 - `list_transformation_specs`
-- `get_semantic_specs`
 
-That is the configured semantic layer the agent should use before guessing joins or formulas.
+That is the configured semantic layer the agent should use before guessing joins or formulas. For large databases, do not put the full lineage in the prompt; require the agent to search and fetch node context for only the relevant metric, table, or column.
 
 ## Map Metrics
 
@@ -190,3 +191,15 @@ For a fully general agent, split the demo-specific finance pieces from the gener
 - Allow config-driven data-quality checks.
 - Add a generic `inspect-db` command that exports candidate node and column stubs from SQLite schema.
 - Add tests with a second tiny SQLite fixture to prove the agent works outside the finance demo.
+
+## Large Lineage Pattern
+
+When lineage is too large for the model context window, keep the complete specs in YAML or another metadata store and expose retrieval tools. The live prompt should contain only counts, metric mappings, and instructions to retrieve relevant slices.
+
+Use this sequence:
+
+1. Search by metric, table, column, or business term with `search_semantic_specs`.
+2. Fetch the focused node packet with `get_node_context`.
+3. Expand upstream with `trace_upstream` using a small `max_depth`.
+4. Fetch relationships or transformations for the node with small `limit` values.
+5. Run read-only SQL only after the semantic slice identifies the relevant tables and fields.

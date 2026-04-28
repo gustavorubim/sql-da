@@ -75,6 +75,8 @@ def test_analysis_toolkit_exposes_schema_lineage_and_variances():
     assert any(node["node_id"] == "invoices" for node in toolkit.list_lineage_nodes())
     assert toolkit.get_lineage_node("mart_revenue_monthly")["type"] == "mart_view"
     assert "invoices" in toolkit.trace_upstream("mart_revenue_monthly")
+    assert toolkit.run_sql("SELECT period FROM invoices")[0]["error_type"] == ("SQLExecutionError")
+    assert toolkit.run_sql("DROP TABLE invoices")[0]["error_type"] == "SQLSafetyError"
     assert any(
         relationship["relationship_id"] == "invoice_product"
         for relationship in toolkit.list_relationship_specs()
@@ -84,14 +86,22 @@ def test_analysis_toolkit_exposes_schema_lineage_and_variances():
         for transformation in toolkit.list_transformation_specs("products")
     )
     assert "relationships" in toolkit.get_semantic_specs()
+    assert toolkit.get_semantic_summary()["relationship_count"] > 0
+    assert toolkit.search_semantic_specs("cloud cogs", limit=1)[0]["id"] == (
+        "cloud_cogs_bill_amount"
+    )
+    assert toolkit.get_node_context("products", limit=1)["node"]["node_id"] == "products"
     assert "lineage" not in toolkit.as_json({"lineage": []}).casefold().replace("lineage", "")
 
     summary = toolkit.get_variance_summary("2026-03", "2026-02")
-    drivers = toolkit.get_metric_drivers("vendor_expense", "2026-03", "2026-02")
+    drivers = toolkit.get_metric_drivers("Vendor Expense", "2026-03", "2026-02")
+    bad_metric = toolkit.get_metric_drivers("G&A Expense", "2026-03", "2026-02")
     data_quality = toolkit.get_data_quality_findings("2026-03")
 
     assert any(item["metric"] == "revenue" for item in summary)
     assert drivers[0]["label"].startswith("ConsultCo")
+    assert bad_metric[0]["error"] == "Unknown metric: g&a_expense"
+    assert "net_income" in bad_metric[0]["valid_metrics"]
     assert any(item["issue_id"] == "duplicate_vendor_bill" for item in data_quality)
 
 
@@ -177,9 +187,13 @@ def test_gemini_model_kwargs_and_agent_creation(monkeypatch):
     assert captured["chat_kwargs"] == chat_google_genai_kwargs(model)
     assert captured["deep_agent_kwargs"]["model"].__class__ is FakeChatGoogleGenerativeAI
     tool_names = {tool.name for tool in captured["deep_agent_kwargs"]["tools"]}
-    assert {"list_relationship_specs", "list_transformation_specs", "get_semantic_specs"} <= (
-        tool_names
-    )
+    assert {
+        "search_semantic_specs",
+        "get_node_context",
+        "list_relationship_specs",
+        "list_transformation_specs",
+    } <= tool_names
+    assert "get_semantic_specs" not in tool_names
 
 
 def test_agent_review_uses_fake_agent_when_key_present(monkeypatch):
@@ -191,8 +205,8 @@ def test_agent_review_uses_fake_agent_when_key_present(monkeypatch):
         def invoke(self, payload):
             assert "messages" in payload
             assert "/memory/AGENTS.md" in payload["files"]
-            assert '"semantic_specs"' in payload["messages"][0]["content"]
-            assert "cloud_cogs_bill_amount" in payload["messages"][0]["content"]
+            assert '"semantic_summary"' in payload["messages"][0]["content"]
+            assert "cloud_cogs_bill_amount" not in payload["messages"][0]["content"]
             return {
                 "messages": [
                     {

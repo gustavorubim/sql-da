@@ -31,6 +31,7 @@ class AgentUnavailable(RuntimeError):
 SYSTEM_PROMPT = """You are a finance variance analyst.
 Use lineage before writing root-cause claims. Use read-only SQL only.
 Use configured relationship and transformation specs before inferring joins, summaries, or formulas.
+For large lineage graphs, retrieve only the relevant slice with search and node-context tools.
 Every conclusion must cite the metric, relevant lineage nodes, and SQL evidence.
 Check data quality evidence before concluding a variance is purely business-driven.
 Do not invent tables, columns, customers, vendors, or accounting explanations."""
@@ -121,28 +122,50 @@ def create_variance_agent(
         return toolkit.as_json(toolkit.get_lineage_node(node_id))
 
     @tool
-    def trace_upstream(node_id: str) -> str:
-        """Trace a lineage node upstream to raw source tables."""
+    def trace_upstream(node_id: str, max_depth: int = 2) -> str:
+        """Trace a lineage node upstream with a bounded maximum depth."""
 
-        return toolkit.as_json(toolkit.trace_upstream(node_id))
-
-    @tool
-    def list_relationship_specs() -> str:
-        """List configured join and relationship specs from lineage YAML."""
-
-        return toolkit.as_json(toolkit.list_relationship_specs())
+        return toolkit.as_json(toolkit.trace_upstream(node_id, max_depth=max_depth))
 
     @tool
-    def list_transformation_specs(node_id: str = "") -> str:
+    def search_semantic_specs(query: str, limit: int = 10) -> str:
+        """Search configured nodes, relationships, and transformations with bounded results."""
+
+        return toolkit.as_json(toolkit.search_semantic_specs(query, limit))
+
+    @tool
+    def get_node_context(
+        node_id: str,
+        include_relationships: bool = True,
+        include_transformations: bool = True,
+        include_columns: bool = True,
+        max_upstream_depth: int = 2,
+        limit: int = 20,
+    ) -> str:
+        """Fetch a bounded context packet for one lineage node."""
+
+        return toolkit.as_json(
+            toolkit.get_node_context(
+                node_id,
+                include_relationships,
+                include_transformations,
+                include_columns,
+                max_upstream_depth,
+                limit,
+            )
+        )
+
+    @tool
+    def list_relationship_specs(node_id: str = "", limit: int = 20) -> str:
+        """List configured join and relationship specs, optionally filtered by node."""
+
+        return toolkit.as_json(toolkit.list_relationship_specs(node_id, limit))
+
+    @tool
+    def list_transformation_specs(node_id: str = "", limit: int = 20) -> str:
         """List configured transformation specs, optionally filtered by lineage node."""
 
-        return toolkit.as_json(toolkit.list_transformation_specs(node_id))
-
-    @tool
-    def get_semantic_specs() -> str:
-        """Fetch all configured relationship and transformation specs."""
-
-        return toolkit.as_json(toolkit.get_semantic_specs())
+        return toolkit.as_json(toolkit.list_transformation_specs(node_id, limit))
 
     @tool
     def get_metric_drivers(metric: str, period: str, compare_to: str) -> str:
@@ -162,9 +185,10 @@ def create_variance_agent(
         list_lineage_nodes,
         get_lineage_node,
         trace_upstream,
+        search_semantic_specs,
+        get_node_context,
         list_relationship_specs,
         list_transformation_specs,
-        get_semantic_specs,
         get_metric_drivers,
         get_data_quality_findings,
     ]
@@ -225,7 +249,7 @@ def run_agent_review(
         review_payload = _review_payload(
             findings,
             data_quality_findings,
-            toolkit.get_semantic_specs(),
+            toolkit.get_semantic_summary(),
         )
         payload: dict[str, Any] = {
             "messages": [
@@ -268,12 +292,12 @@ def run_agent_review(
 def _review_payload(
     findings: list[dict[str, Any]],
     data_quality_findings: list[dict[str, Any]] | None,
-    semantic_specs: dict[str, Any] | None = None,
+    semantic_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "findings": findings,
         "data_quality_findings": data_quality_findings or [],
-        "semantic_specs": semantic_specs or {},
+        "semantic_summary": semantic_summary or {},
     }
 
 

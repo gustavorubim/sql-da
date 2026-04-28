@@ -141,7 +141,7 @@ class LineageGraph:
         errors.extend(self._validate_transformations())
         return errors
 
-    def trace_upstream(self, node_id: str) -> list[str]:
+    def trace_upstream(self, node_id: str, max_depth: int | None = None) -> list[str]:
         """Return a depth-first upstream lineage path with the requested node first."""
 
         if node_id not in self.nodes:
@@ -149,19 +149,22 @@ class LineageGraph:
         ordered: list[str] = []
         seen: set[str] = set()
 
-        def visit(current: str) -> None:
+        def visit(current: str, depth: int) -> None:
             if current in seen:
                 return
             seen.add(current)
             ordered.append(current)
+            if max_depth is not None and depth >= max(max_depth, 0):
+                return
             for upstream in self.nodes[current].upstream:
-                visit(upstream)
+                visit(upstream, depth + 1)
 
-        visit(node_id)
+        visit(node_id, 0)
         return ordered
 
     def trace_metric(self, metric: str) -> list[str]:
-        mapping = self.metric_mappings.get(metric)
+        metric_key = _metric_key(metric)
+        mapping = self.metric_mappings.get(metric) or self.metric_mappings.get(metric_key)
         if mapping is None:
             raise KeyError(f"Unknown metric: {metric}")
         return self.trace_upstream(mapping["node"])
@@ -178,15 +181,31 @@ class LineageGraph:
             for node in self.nodes.values()
         ]
 
-    def list_relationship_specs(self) -> list[dict[str, str]]:
+    def list_relationship_specs(
+        self,
+        node_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, str]]:
         """Return configured join and relationship specs."""
 
-        return [relationship.to_dict() for relationship in self.relationships.values()]
+        relationships = list(self.relationships.values())
+        if node_id:
+            relationships = [
+                relationship
+                for relationship in relationships
+                if self._resolve_reference_node(relationship.left) == node_id
+                or self._resolve_reference_node(relationship.right) == node_id
+            ]
+        return [relationship.to_dict() for relationship in _limited(relationships, limit)]
 
-    def list_transformation_specs(self, node_id: str | None = None) -> list[dict[str, Any]]:
+    def list_transformation_specs(
+        self,
+        node_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Return configured transformation specs, optionally filtered by node."""
 
-        specs = self.transformations.values()
+        specs = list(self.transformations.values())
         if node_id:
             specs = [
                 spec
@@ -194,7 +213,7 @@ class LineageGraph:
                 if node_id in self._transformation_node_ids(spec)
                 or self._resolve_reference_node(spec.output) == node_id
             ]
-        return [spec.to_dict() for spec in specs]
+        return [spec.to_dict() for spec in _limited(specs, limit)]
 
     def semantic_specs(self) -> dict[str, Any]:
         """Return all configured relationship and transformation specs."""
@@ -203,6 +222,124 @@ class LineageGraph:
             "relationships": self.list_relationship_specs(),
             "transformations": self.list_transformation_specs(),
         }
+
+    def semantic_summary(self) -> dict[str, Any]:
+        """Return compact semantic-layer counts for model prompts."""
+
+        return {
+            "node_count": len(self.nodes),
+            "relationship_count": len(self.relationships),
+            "transformation_count": len(self.transformations),
+            "metric_count": len(self.metric_mappings),
+            "metric_mappings": {
+                metric: {
+                    "node": mapping.get("node", ""),
+                    "value_column": mapping.get("value_column", ""),
+                }
+                for metric, mapping in self.metric_mappings.items()
+            },
+            "retrieval_guidance": (
+                "Use search_semantic_specs and get_node_context to retrieve only the "
+                "lineage slice needed for the current metric, table, or column."
+            ),
+        }
+
+    def search_semantic_specs(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search nodes, relationships, and transformations with bounded results."""
+
+        terms = _query_terms(query)
+        results: list[dict[str, Any]] = []
+        for node in self.nodes.values():
+            payload = {
+                "node_id": node.node_id,
+                "type": node.node_type,
+                "grain": node.grain,
+                "description": node.description,
+                "columns": list(node.columns),
+                "upstream": list(node.upstream),
+            }
+            score = _match_score(terms, payload)
+            if score:
+                results.append(
+                    {
+                        "kind": "node",
+                        "id": node.node_id,
+                        "score": score,
+                        "summary": f"{node.node_type}: {node.description}",
+                        "spec": payload,
+                    }
+                )
+        for relationship in self.relationships.values():
+            payload = relationship.to_dict()
+            score = _match_score(terms, payload)
+            if score:
+                results.append(
+                    {
+                        "kind": "relationship",
+                        "id": relationship.relationship_id,
+                        "score": score,
+                        "summary": f"{relationship.left} -> {relationship.right}",
+                        "spec": payload,
+                    }
+                )
+        for transformation in self.transformations.values():
+            payload = transformation.to_dict()
+            score = _match_score(terms, payload)
+            if score:
+                results.append(
+                    {
+                        "kind": "transformation",
+                        "id": transformation.transformation_id,
+                        "score": score,
+                        "summary": f"{transformation.output}: {transformation.expression}",
+                        "spec": payload,
+                    }
+                )
+        results.sort(key=lambda item: (-int(item["score"]), str(item["kind"]), str(item["id"])))
+        return results[: max(limit, 0)]
+
+    def get_node_context(
+        self,
+        node_id: str,
+        *,
+        include_relationships: bool = True,
+        include_transformations: bool = True,
+        include_columns: bool = True,
+        max_upstream_depth: int = 2,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return a bounded context packet for one node."""
+
+        if node_id not in self.nodes:
+            raise KeyError(f"Unknown lineage node: {node_id}")
+        node = self.nodes[node_id]
+        context: dict[str, Any] = {
+            "node": {
+                "node_id": node.node_id,
+                "type": node.node_type,
+                "grain": node.grain,
+                "description": node.description,
+                "upstream": list(node.upstream),
+            },
+            "upstream_path": self.trace_upstream(node_id, max_depth=max_upstream_depth),
+            "downstream": [
+                candidate.node_id
+                for candidate in self.nodes.values()
+                if node_id in candidate.upstream
+            ][: max(limit, 0)],
+            "metric_mappings": {
+                metric: mapping
+                for metric, mapping in self.metric_mappings.items()
+                if mapping.get("node") == node_id
+            },
+        }
+        if include_columns:
+            context["node"]["columns"] = list(node.columns)
+        if include_relationships:
+            context["relationships"] = self.list_relationship_specs(node_id, limit=limit)
+        if include_transformations:
+            context["transformations"] = self.list_transformation_specs(node_id, limit=limit)
+        return context
 
     def _validate_relationships(self) -> list[str]:
         errors: list[str] = []
@@ -352,3 +489,38 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list | tuple):
         raise ValueError("spec list values must be strings or lists of strings")
     return tuple(str(item) for item in value)
+
+
+def _limited(values: list[Any], limit: int | None) -> list[Any]:
+    if limit is None:
+        return values
+    return values[: max(limit, 0)]
+
+
+def _query_terms(query: str) -> tuple[str, ...]:
+    return tuple(term for term in query.casefold().replace("_", " ").split() if term)
+
+
+def _match_score(terms: tuple[str, ...], payload: dict[str, Any]) -> int:
+    if not terms:
+        return 1
+    text = " ".join(str(value) for value in _flatten_values(payload)).casefold().replace("_", " ")
+    return sum(text.count(term) for term in terms)
+
+
+def _flatten_values(value: Any) -> list[Any]:
+    if isinstance(value, dict):
+        flattened: list[Any] = []
+        for key, item in value.items():
+            flattened.extend([key, *_flatten_values(item)])
+        return flattened
+    if isinstance(value, list | tuple):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_values(item))
+        return flattened
+    return [value]
+
+
+def _metric_key(metric: str) -> str:
+    return "_".join(str(metric).strip().casefold().replace("-", " ").split())
