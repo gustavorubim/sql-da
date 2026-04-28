@@ -1,0 +1,182 @@
+version: 1
+nodes:
+  gl_entries:
+    type: raw_table
+    grain: one row per accounting entry
+    description: Posted general ledger entries sourced from billing, payroll, and AP systems.
+    columns:
+      - entry_id
+      - entry_month
+      - account_id
+      - department_id
+      - source_table
+      - source_id
+      - amount
+  invoices:
+    type: raw_table
+    grain: one row per monthly customer invoice
+    description: Customer invoices generated from active contracts.
+    columns:
+      - invoice_id
+      - invoice_month
+      - customer_id
+      - product_id
+      - amount
+      - quantity
+  customer_contracts:
+    type: raw_table
+    grain: one row per commercial contract line
+    description: Contract terms that drive recurring invoices.
+    columns:
+      - contract_id
+      - customer_id
+      - product_id
+      - start_month
+      - end_month
+      - monthly_amount
+  vendor_bills:
+    type: raw_table
+    grain: one row per vendor invoice
+    description: Vendor AP bills, including cloud COGS and operating expenses.
+    columns:
+      - bill_id
+      - bill_month
+      - vendor_name
+      - account_id
+      - amount
+      - description
+  payroll_runs:
+    type: raw_table
+    grain: one row per department payroll run per month
+    description: Payroll cost and headcount by department.
+    columns:
+      - payroll_id
+      - pay_month
+      - department_id
+      - employee_count
+      - gross_pay
+  departments:
+    type: dimension
+    grain: one row per department
+    description: Department dimension used by payroll and expense allocations.
+    columns:
+      - department_id
+      - department_name
+  accounts:
+    type: dimension
+    grain: one row per chart-of-accounts entry
+    description: Financial statement classification for GL entries and vendor bills.
+    columns:
+      - account_id
+      - account_name
+      - statement_line
+  customers:
+    type: dimension
+    grain: one row per customer
+    description: Customer dimension with segment and status.
+    columns:
+      - customer_id
+      - customer_name
+      - segment
+      - status
+  products:
+    type: dimension
+    grain: one row per product
+    description: Product dimension used for revenue mix and COGS analysis.
+    columns:
+      - product_id
+      - product_name
+      - gross_margin_profile
+  mart_revenue_monthly:
+    type: mart_view
+    grain: one row per month
+    description: Monthly revenue recognized from invoices.
+    upstream:
+      - invoices
+      - customer_contracts
+      - customers
+      - products
+    columns:
+      - month
+      - revenue
+  mart_cogs_monthly:
+    type: mart_view
+    grain: one row per month
+    description: Monthly cloud and delivery cost classified as COGS.
+    upstream:
+      - vendor_bills
+      - accounts
+      - products
+    columns:
+      - month
+      - cogs
+  mart_payroll_monthly:
+    type: mart_view
+    grain: one row per month
+    description: Monthly payroll expense by pay period.
+    upstream:
+      - payroll_runs
+      - departments
+    columns:
+      - month
+      - payroll_expense
+  mart_vendor_spend_monthly:
+    type: mart_view
+    grain: one row per month
+    description: Monthly non-COGS vendor spend.
+    upstream:
+      - vendor_bills
+      - departments
+      - accounts
+    columns:
+      - month
+      - vendor_expense
+  mart_department_expense_monthly:
+    type: mart_view
+    grain: one row per department per month
+    description: Operating expense by department from payroll and vendor spend.
+    upstream:
+      - payroll_runs
+      - vendor_bills
+      - departments
+      - accounts
+    columns:
+      - month
+      - department_name
+      - expense_type
+      - amount
+  mart_financials_monthly:
+    type: mart_view
+    grain: one row per metric per month
+    description: Monthly financial statement metrics used for variance detection.
+    upstream:
+      - mart_revenue_monthly
+      - mart_cogs_monthly
+      - mart_payroll_monthly
+      - mart_vendor_spend_monthly
+    columns:
+      - month
+      - metric
+      - value
+metric_mappings:
+  revenue:
+    node: mart_revenue_monthly
+    value_column: revenue
+  cogs:
+    node: mart_cogs_monthly
+    value_column: cogs
+  gross_margin:
+    node: mart_financials_monthly
+    value_column: value
+  payroll_expense:
+    node: mart_payroll_monthly
+    value_column: payroll_expense
+  vendor_expense:
+    node: mart_vendor_spend_monthly
+    value_column: vendor_expense
+  operating_expense:
+    node: mart_financials_monthly
+    value_column: value
+  net_income:
+    node: mart_financials_monthly
+    value_column: value

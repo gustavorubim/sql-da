@@ -1,0 +1,28 @@
+database:
+  uri: sqlite:///data/demo_finance.db
+  path: data/demo_finance.db
+lineage_path: configs/lineage.yaml
+report_dir: reports
+model:
+  name: google_genai:gemini-3-flash-preview
+  temperature: 0.0
+  enable_live_agent: true
+agent:
+  memory_paths:
+    - memory/AGENTS.md
+  skill_paths:
+    - skills
+analysis:
+  materiality_abs: 5000.0
+  materiality_pct: 0.05
+  max_query_rows: 100
+  metrics:
+    - revenue
+    - cogs
+    - gross_margin
+    - payroll_expense
+    - vendor_expense
+    - operating_expense
+    - net_income
+reward:
+  output_path: reports/reward_score.json
