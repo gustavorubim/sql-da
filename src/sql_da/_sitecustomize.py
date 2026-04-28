@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 
 def _add_local_src_path() -> None:
@@ -24,7 +25,7 @@ def _add_local_src_path() -> None:
         parsed = urlparse(url)
         if parsed.scheme != "file":
             continue
-        src_path = Path(unquote(parsed.path)) / "src"
+        src_path = Path(url2pathname(unquote(parsed.path))) / "src"
         if (src_path / "sql_da").is_dir() and str(src_path) not in sys.path:
             sys.path.insert(0, str(src_path))
 

@@ -78,6 +78,8 @@ class AnalysisResult:
     findings: list[VarianceFinding]
     data_quality_findings: list[DataQualityFinding]
     agent_review: str
+    llm_token_usage: dict[str, Any] = field(default_factory=dict)
+    llm_cost_estimate: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +89,8 @@ class AnalysisResult:
             "trace_json_path": self.trace_json_path,
             "trace_csv_path": self.trace_csv_path,
             "agent_review": self.agent_review,
+            "llm_token_usage": self.llm_token_usage,
+            "llm_cost_estimate": self.llm_cost_estimate,
             "findings": [finding.to_dict() for finding in self.findings],
             "data_quality_findings": [finding.to_dict() for finding in self.data_quality_findings],
         }

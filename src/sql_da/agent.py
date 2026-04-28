@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +20,8 @@ class AgentReview:
     enabled: bool
     content: str
     research_steps: list[dict[str, Any]] = field(default_factory=list)
+    token_usage: dict[str, int] = field(default_factory=dict)
+    cost_estimate: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentUnavailable(RuntimeError):
@@ -53,6 +56,25 @@ SUBAGENTS = (
         "Reject unsupported claims, unrelated metric drivers, and unresolved limitations.",
     ),
 )
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+PRICING_SOURCE_URL = "https://ai.google.dev/gemini-api/docs/pricing"
+PRICING_SOURCE_LAST_UPDATED = "2026-04-22"
+
+
+@dataclass(frozen=True)
+class ModelTokenPricing:
+    """Paid-tier text token prices per 1M tokens."""
+
+    input_usd_per_1m: float
+    output_usd_per_1m: float
+    cached_input_usd_per_1m: float | None = None
+
+
+MODEL_TOKEN_PRICING_USD_PER_1M = {
+    "gemini-3-flash-preview": ModelTokenPricing(0.50, 3.00, 0.05),
+}
 
 
 def should_run_live_agent(model: ModelConfig) -> bool:
@@ -155,12 +177,16 @@ def run_agent_review(
     findings: list[dict[str, Any]],
     data_quality_findings: list[dict[str, Any]] | None = None,
     agent_context: AgentVirtualContext | None = None,
+    on_step: ProgressCallback | None = None,
 ) -> AgentReview:
     """Run a live Deep Agent review when credentials are present; otherwise skip."""
 
     if not should_run_live_agent(model):
         return AgentReview(
-            enabled=False, content="Live Gemini review skipped: GOOGLE_API_KEY is not set."
+            enabled=False,
+            content="Live Gemini review skipped: GOOGLE_API_KEY is not set.",
+            token_usage=_empty_token_usage(),
+            cost_estimate=estimate_llm_cost(model.name, _empty_token_usage(), enabled=False),
         )
     try:
         agent = create_variance_agent(model, toolkit, agent_context)
@@ -181,15 +207,24 @@ def run_agent_review(
         }
         if agent_context and agent_context.files:
             payload["files"] = agent_context.files
-        response = agent.invoke(payload)
+        response = _invoke_agent(agent, payload, on_step)
     except (
         Exception
     ) as exc:  # pragma: no cover - network/provider failures are environment-specific
-        return AgentReview(enabled=True, content=f"Live Gemini review failed: {exc}")
+        empty_usage = _empty_token_usage()
+        return AgentReview(
+            enabled=True,
+            content=f"Live Gemini review failed: {exc}",
+            token_usage=empty_usage,
+            cost_estimate=estimate_llm_cost(model.name, empty_usage, enabled=True),
+        )
+    token_usage = extract_agent_token_usage(response)
     return AgentReview(
         enabled=True,
         content=_extract_agent_text(response),
         research_steps=_extract_agent_research_steps(response),
+        token_usage=token_usage,
+        cost_estimate=estimate_llm_cost(model.name, token_usage, enabled=True),
     )
 
 
@@ -219,6 +254,8 @@ def _extract_agent_research_steps(response: Any) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     for index, message in enumerate(messages, start=1):
         role = _message_role(message)
+        if role in {"human", "user"}:
+            continue
         content = getattr(message, "content", None)
         if content is None and isinstance(message, dict):
             content = message.get("content")
@@ -240,11 +277,22 @@ def _extract_agent_research_steps(response: Any) -> list[dict[str, Any]]:
                     }
                 )
         text = _content_to_text(content)
+        if role == "tool" and text:
+            steps.append(
+                {
+                    "actor": role,
+                    "action": "tool result",
+                    "tool": _message_name(message),
+                    "output_summary": text,
+                    "metadata": {"message_index": index},
+                }
+            )
+            continue
         if text:
             steps.append(
                 {
                     "actor": role,
-                    "action": "message",
+                    "action": "agent message",
                     "output_summary": text,
                     "metadata": {"message_index": index},
                 }
@@ -252,10 +300,177 @@ def _extract_agent_research_steps(response: Any) -> list[dict[str, Any]]:
     return steps
 
 
+def extract_agent_token_usage(response: Any) -> dict[str, int]:
+    """Aggregate token usage reported on agent response messages."""
+
+    usage = _empty_token_usage()
+    messages = response.get("messages", []) if isinstance(response, dict) else []
+    for message in messages:
+        message_usage = _message_usage_metadata(message)
+        if not message_usage:
+            continue
+        normalized = _normalize_token_usage(message_usage)
+        for key, value in normalized.items():
+            usage[key] += value
+    if not usage["total_tokens"]:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    return usage
+
+
+def estimate_llm_cost(
+    model_name: str,
+    token_usage: dict[str, int],
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Estimate paid-tier Gemini token cost from usage metadata."""
+
+    normalized_model = _normalize_model_name(model_name)
+    estimate: dict[str, Any] = {
+        "model": model_name,
+        "normalized_model": normalized_model,
+        "currency": "USD",
+        "pricing_source": PRICING_SOURCE_URL,
+        "pricing_source_last_updated": PRICING_SOURCE_LAST_UPDATED,
+        "input_tokens": int(token_usage.get("input_tokens", 0)),
+        "output_tokens": int(token_usage.get("output_tokens", 0)),
+        "total_tokens": int(token_usage.get("total_tokens", 0)),
+        "cached_input_tokens": int(token_usage.get("cached_input_tokens", 0)),
+        "total_cost_usd": 0.0 if not enabled else None,
+        "status": "skipped" if not enabled else "unavailable",
+        "note": (
+            "Estimate uses Gemini API paid-tier standard text token rates and excludes "
+            "free-tier credits, taxes, and non-token tool fees."
+        ),
+    }
+    if not enabled:
+        return estimate
+    if not any(
+        estimate[key]
+        for key in ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens")
+    ):
+        estimate["note"] += " Token usage metadata was not returned by the provider."
+        return estimate
+    pricing = MODEL_TOKEN_PRICING_USD_PER_1M.get(normalized_model)
+    if pricing is None:
+        estimate["note"] += " No local pricing table entry exists for this model."
+        return estimate
+
+    cached_input_tokens = estimate["cached_input_tokens"]
+    standard_input_tokens = max(estimate["input_tokens"] - cached_input_tokens, 0)
+    input_cost = standard_input_tokens * pricing.input_usd_per_1m / 1_000_000
+    output_cost = estimate["output_tokens"] * pricing.output_usd_per_1m / 1_000_000
+    cached_input_cost = (
+        cached_input_tokens * pricing.cached_input_usd_per_1m / 1_000_000
+        if pricing.cached_input_usd_per_1m is not None
+        else 0.0
+    )
+    estimate.update(
+        {
+            "status": "estimated",
+            "input_usd_per_1m": pricing.input_usd_per_1m,
+            "output_usd_per_1m": pricing.output_usd_per_1m,
+            "cached_input_usd_per_1m": pricing.cached_input_usd_per_1m,
+            "billable_input_tokens": standard_input_tokens,
+            "input_cost_usd": round(input_cost, 8),
+            "output_cost_usd": round(output_cost, 8),
+            "cached_input_cost_usd": round(cached_input_cost, 8),
+            "total_cost_usd": round(input_cost + output_cost + cached_input_cost, 8),
+        }
+    )
+    return estimate
+
+
+def _invoke_agent(
+    agent: Any,
+    payload: dict[str, Any],
+    on_step: ProgressCallback | None,
+) -> Any:
+    stream = getattr(agent, "stream", None)
+    if on_step is None or not callable(stream):
+        return agent.invoke(payload)
+    return _stream_agent(agent, payload, on_step)
+
+
+def _stream_agent(
+    agent: Any,
+    payload: dict[str, Any],
+    on_step: ProgressCallback,
+) -> Any:
+    final_response: Any | None = None
+    seen_messages: set[str] = set()
+    collected_messages: list[Any] = []
+    for chunk in _agent_stream_chunks(agent, payload):
+        response_candidate = _response_candidate(chunk)
+        if response_candidate is not None:
+            final_response = response_candidate
+        for message in _iter_stream_messages(chunk):
+            message_key = _message_fingerprint(message)
+            if message_key in seen_messages:
+                continue
+            seen_messages.add(message_key)
+            collected_messages.append(message)
+            for step in _steps_for_message(message, len(collected_messages)):
+                on_step(step)
+    if final_response is not None:
+        final_messages = (
+            final_response.get("messages", []) if isinstance(final_response, dict) else []
+        )
+        if len(final_messages) < len(collected_messages):
+            return {"messages": collected_messages}
+        return final_response
+    return {"messages": collected_messages}
+
+
+def _agent_stream_chunks(agent: Any, payload: dict[str, Any]) -> Any:
+    try:
+        yield from agent.stream(payload, stream_mode="values")
+    except TypeError:
+        yield from agent.stream(payload)
+
+
+def _response_candidate(chunk: Any) -> Any | None:
+    if isinstance(chunk, dict) and isinstance(chunk.get("messages"), list):
+        return chunk
+    if isinstance(chunk, dict):
+        for value in chunk.values():
+            if isinstance(value, dict) and isinstance(value.get("messages"), list):
+                return value
+    return None
+
+
+def _iter_stream_messages(chunk: Any) -> list[Any]:
+    if isinstance(chunk, dict) and isinstance(chunk.get("messages"), list):
+        return list(chunk["messages"])
+    messages: list[Any] = []
+    if isinstance(chunk, dict):
+        for value in chunk.values():
+            if isinstance(value, dict) and isinstance(value.get("messages"), list):
+                messages.extend(value["messages"])
+    return messages
+
+
+def _steps_for_message(message: Any, message_index: int) -> list[dict[str, Any]]:
+    steps = _extract_agent_research_steps({"messages": [message]})
+    return [
+        {
+            **step,
+            "metadata": {**dict(step.get("metadata", {})), "message_index": message_index},
+        }
+        for step in steps
+    ]
+
+
 def _message_role(message: Any) -> str:
     if isinstance(message, dict):
         return str(message.get("role") or message.get("type") or "agent")
     return str(getattr(message, "type", None) or getattr(message, "role", None) or "agent")
+
+
+def _message_name(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("name") or "")
+    return str(getattr(message, "name", "") or "")
 
 
 def _tool_name(tool_call: Any) -> str:
@@ -276,3 +491,121 @@ def _content_to_text(content: Any) -> str:
                 parts.append(block)
         return "\n".join(part for part in parts if part)
     return "" if content is None else str(content)
+
+
+def _message_fingerprint(message: Any) -> str:
+    role = _message_role(message)
+    name = _message_name(message)
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+    message_id = getattr(message, "id", None)
+    if message_id is None and isinstance(message, dict):
+        message_id = message.get("id")
+    if message_id:
+        return f"id:{message_id}"
+    return json.dumps(
+        {
+            "role": role,
+            "name": name,
+            "content": content,
+            "tool_calls": _message_tool_calls(message),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _message_tool_calls(message: Any) -> Any:
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls is None and isinstance(message, dict):
+        tool_calls = message.get("tool_calls") or message.get("additional_kwargs", {}).get(
+            "tool_calls"
+        )
+    return tool_calls
+
+
+def _message_usage_metadata(message: Any) -> dict[str, Any]:
+    usage = getattr(message, "usage_metadata", None)
+    if usage is not None:
+        return dict(usage)
+    if isinstance(message, dict):
+        for key in ("usage_metadata", "usage", "token_usage"):
+            value = message.get(key)
+            if isinstance(value, dict):
+                return value
+        response_metadata = message.get("response_metadata")
+        if isinstance(response_metadata, dict):
+            for key in ("usage_metadata", "usage", "token_usage"):
+                value = response_metadata.get(key)
+                if isinstance(value, dict):
+                    return value
+        additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict):
+            value = additional_kwargs.get("usage_metadata")
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _normalize_token_usage(usage: dict[str, Any]) -> dict[str, int]:
+    input_tokens = _first_int(
+        usage, ("input_tokens", "prompt_tokens", "input_token_count", "prompt_token_count")
+    )
+    output_tokens = _first_int(
+        usage,
+        (
+            "output_tokens",
+            "completion_tokens",
+            "output_token_count",
+            "candidates_token_count",
+        ),
+    )
+    total_tokens = _first_int(usage, ("total_tokens", "total_token_count"))
+    cached_input_tokens = _first_int(
+        usage,
+        (
+            "cached_input_tokens",
+            "cache_read_input_tokens",
+            "cached_content_token_count",
+        ),
+    )
+    input_details = usage.get("input_token_details")
+    if isinstance(input_details, dict):
+        cached_input_tokens = max(
+            cached_input_tokens,
+            _first_int(input_details, ("cache_read", "cache_read_tokens", "cached_tokens")),
+        )
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cached_input_tokens": cached_input_tokens,
+    }
+
+
+def _first_int(values: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        value = values.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int | float):
+            return int(value)
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _empty_token_usage() -> dict[str, int]:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+    }
+
+
+def _normalize_model_name(model_name: str) -> str:
+    return model_name.rsplit(":", maxsplit=1)[-1]

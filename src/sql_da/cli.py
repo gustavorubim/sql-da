@@ -27,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--compare-to", required=True)
     analyze_parser.add_argument("--run-id")
     analyze_parser.add_argument("--verbose", action="store_true", help="Show Rich stage output.")
+    analyze_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the final JSON payload even when --verbose is enabled.",
+    )
 
     lineage_parser = subparsers.add_parser("validate-lineage", help="Validate lineage YAML.")
     lineage_parser.add_argument("--lineage", default="configs/lineage.yaml")
@@ -35,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     reward_parser = subparsers.add_parser("reward", help="Run the verifiable reward suite.")
     reward_parser.add_argument("--config", default="configs/demo.yaml")
     reward_parser.add_argument("--verbose", action="store_true", help="Show Rich stage output.")
+    reward_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the final JSON payload even when --verbose is enabled.",
+    )
     reward_parser.add_argument(
         "--skip-quality-gates",
         action="store_true",
@@ -62,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             reporter=reporter,
         )
-        print_json(result.to_dict())
+        payload = result.to_dict()
+        if args.verbose and not args.json:
+            reporter.stage(_analysis_summary(payload))
+        else:
+            print_json(payload)
         return 0
     if args.command == "validate-lineage":
         with reporter.status("Validating lineage YAML"):
@@ -81,9 +95,29 @@ def main(argv: list[str] | None = None) -> int:
             reporter=reporter,
         )
         reporter.checks_table(payload)
-        print_json(payload)
+        if args.verbose and not args.json:
+            reporter.stage(_reward_summary(payload, config.reward.output_path))
+        else:
+            print_json(payload)
         return 0 if payload["passed"] else 1
     raise AssertionError(f"Unhandled command: {args.command}")  # pragma: no cover
+
+
+def _analysis_summary(payload: dict) -> str:
+    cost = payload.get("llm_cost_estimate", {})
+    total_cost = cost.get("total_cost_usd")
+    cost_text = "unknown" if total_cost is None else f"${total_cost:.8f}"
+    return (
+        "Analysis complete: "
+        f"report={payload.get('report_path')}; "
+        f"trace={payload.get('trace_json_path')}; "
+        f"llm_cost={cost_text}"
+    )
+
+
+def _reward_summary(payload: dict, output_path: Path) -> str:
+    status = "passed" if payload.get("passed") else "failed"
+    return f"Reward {status}: score={payload.get('score')}; output={output_path}"
 
 
 if __name__ == "__main__":  # pragma: no cover

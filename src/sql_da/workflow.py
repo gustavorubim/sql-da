@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from sql_da.agent import run_agent_review
 from sql_da.agent_context import build_agent_virtual_context
@@ -177,12 +178,28 @@ def analyze(
             input_summary=f"{len(findings)} findings",
         ),
     ):
+        streamed_agent_step_keys: set[tuple[str, str, str, str, str]] = set()
+
+        def record_live_agent_step(step: dict[str, Any]) -> None:
+            streamed_agent_step_keys.add(_agent_step_key(step))
+            trace.record(
+                "live_agent",
+                str(step.get("actor", "deep-agent")),
+                str(step.get("action", "agent message")),
+                tool=str(step.get("tool", "")),
+                input_summary=str(step.get("input_summary", "")),
+                output_summary=str(step.get("output_summary", "")),
+                status=str(step.get("status", "ok")),
+                metadata=dict(step.get("metadata", {})),
+            )
+
         review = run_agent_review(
             config.model,
             toolkit,
             [finding.to_dict() for finding in findings],
             [finding.to_dict() for finding in data_quality_findings],
             agent_context,
+            on_step=record_live_agent_step,
         )
     trace.record(
         "live_agent",
@@ -190,9 +207,27 @@ def analyze(
         "summarize review result",
         output_summary=review.content,
         status="ok" if review.enabled else "skipped",
-        metadata={"enabled": review.enabled},
+        metadata={
+            "enabled": review.enabled,
+            "llm_token_usage": review.token_usage,
+            "llm_cost_estimate": review.cost_estimate,
+        },
     )
-    trace.extend_agent_steps(review.research_steps)
+    trace.record(
+        "live_agent",
+        "workflow",
+        "estimate llm cost",
+        output_summary=_cost_output_summary(review.cost_estimate),
+        status=review.cost_estimate.get("status", "unavailable"),
+        metadata=review.cost_estimate,
+    )
+    trace.extend_agent_steps(
+        [
+            step
+            for step in review.research_steps
+            if _agent_step_key(step) not in streamed_agent_step_keys
+        ]
+    )
     with reporter.status("Writing Markdown and JSON report artifacts"):
         report_path, evidence_path = write_report_artifacts(
             config,
@@ -231,6 +266,8 @@ def analyze(
         findings=findings,
         data_quality_findings=data_quality_findings,
         agent_review=review.content,
+        llm_token_usage=review.token_usage,
+        llm_cost_estimate=review.cost_estimate,
     )
 
 
@@ -294,3 +331,26 @@ def _record_data_quality_research(trace: AgentTrace, findings: list) -> None:
                 "lineage_nodes": finding.lineage_nodes,
             },
         )
+
+
+def _agent_step_key(step: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(step.get("actor", "")),
+        str(step.get("action", "")),
+        str(step.get("tool", "")),
+        str(step.get("input_summary", "")),
+        str(step.get("output_summary", "")),
+    )
+
+
+def _cost_output_summary(cost_estimate: dict[str, Any]) -> str:
+    status = cost_estimate.get("status", "unavailable")
+    total_cost = cost_estimate.get("total_cost_usd")
+    if total_cost is None:
+        return f"LLM cost estimate unavailable ({status})"
+    return (
+        f"estimated LLM cost ${total_cost:.8f}; "
+        f"tokens={cost_estimate.get('total_tokens', 0)}; "
+        f"input={cost_estimate.get('input_tokens', 0)}; "
+        f"output={cost_estimate.get('output_tokens', 0)}"
+    )

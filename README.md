@@ -21,6 +21,8 @@ SQL_DA_MODEL=google_genai:gemini-3-flash-preview
 
 The default Gemini development model is `google_genai:gemini-3-flash-preview`. The underlying Gemini API model code is `gemini-3-flash-preview`.
 
+LLM cost estimates use the Gemini API paid-tier standard text token rates for `gemini-3-flash-preview` from the [Google AI for Developers pricing page](https://ai.google.dev/gemini-api/docs/pricing), last updated there on 2026-04-22: $0.50 per 1M input tokens, $3.00 per 1M output tokens, and $0.05 per 1M cached input tokens. Estimates depend on provider token metadata and exclude free-tier credits, taxes, and non-token tool fees.
+
 ## Run The Demo
 
 ```bash
@@ -36,7 +38,7 @@ The analysis writes:
 - `reports/<run_id>/agent_trace.csv`
 - `reports/<run_id>/agent_trace.json`
 
-If `GOOGLE_API_KEY` is missing, analysis still runs deterministically and records that live Gemini review was skipped.
+The non-verbose CLI JSON result also includes `llm_token_usage` and `llm_cost_estimate`. The trace JSON and CSV include a final `estimate llm cost` row with the same total estimate in metadata. If `GOOGLE_API_KEY` is missing, analysis still runs deterministically and records that live Gemini review was skipped with an estimated LLM cost of `$0.00`.
 
 ## Synthetic Finance Database
 
@@ -134,9 +136,9 @@ These checks are also available to the live Deep Agent through the `get_data_qua
 
 The live Deep Agent receives project memory from `memory/AGENTS.md` and skills from `skills/` through Deep Agents' `memory` and `skills` middleware. The configured custom subagents also receive the project skill source so they can use the same finance variance, SQL lineage, data-quality, and report-quality workflows while keeping their context isolated.
 
-Use `--verbose` on CLI commands to enable Rich stage output and logging on stderr while JSON results remain on stdout.
+Use `--verbose` on CLI commands to enable Rich stage output and logging on stderr. During live Gemini review, verbose mode streams normalized LLM progress when the agent runtime supports it, including tool calls, tool results, intermediate agent messages, and the final token/cost estimate. Verbose `analyze` and `reward` runs suppress the final JSON payload by default; add `--json` when you also want the machine-readable result on stdout.
 
-The trace artifacts are intentionally tabular. They record each research phase, actor, action, tool, input summary, output summary, status, duration, artifact path, and metadata so you can inspect how the workflow moved from lineage to SQL evidence, data-quality checks, and root-cause narrative.
+The trace artifacts are intentionally tabular. They record each research phase, actor, action, tool, input summary, output summary, status, duration, artifact path, and metadata so you can inspect how the workflow moved from lineage to SQL evidence, data-quality checks, root-cause narrative, live-agent activity, and LLM cost estimation.
 
 ## Verify The Implementation
 
@@ -220,7 +222,7 @@ flowchart LR
     RewardTable --> RewardOut["print reward JSON"]
 ```
 
-`--verbose` enables Rich status messages and trace tables on stderr while JSON results stay on stdout for scripting.
+`--verbose` enables Rich status messages, live LLM tool-call/refinement updates, trace tables, and a cost summary on stderr. Non-verbose runs print JSON on stdout for scripting; verbose `analyze` and `reward` runs only print JSON when `--json` is also passed.
 
 ### Analysis Function Flow
 
@@ -396,11 +398,11 @@ flowchart TB
     Tools --> Safety["ReadOnlySQLRunner<br/>blocks mutation + limits rows"]
     Safety --> SQLite["SQLite demo DB"]
     Subagents --> Skills["finance-variance, sql-lineage,<br/>data-quality, report-quality skills"]
-    DeepAgent --> Review["AgentReview<br/>content + research_steps"]
-    Review --> Trace["trace.extend_agent_steps"]
+    DeepAgent --> Review["AgentReview<br/>content + research_steps<br/>token_usage + cost_estimate"]
+    Review --> Trace["live trace rows<br/>+ cost estimate"]
 ```
 
-When `GOOGLE_API_KEY` is absent, this step returns a deterministic skip message. The reports, evidence, reward checks, and trace artifacts still run.
+When `GOOGLE_API_KEY` is absent, this step returns a deterministic skip message and a zero-dollar skipped cost estimate. The reports, evidence, reward checks, and trace artifacts still run.
 
 ### Report And Trace Artifact Flow
 
@@ -413,6 +415,7 @@ flowchart LR
     ReportWriter --> Evidence["reports/{run_id}/variance_evidence.json"]
 
     TraceEvents["AgentTrace events"] --> TraceWriter["trace.write_artifacts"]
+    CostEstimate["LLM token usage + cost estimate"] --> TraceEvents
     TraceWriter --> JsonTrace["reports/{run_id}/agent_trace.json"]
     TraceWriter --> CsvTrace["reports/{run_id}/agent_trace.csv"]
 

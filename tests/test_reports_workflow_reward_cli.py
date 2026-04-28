@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from sql_da.agent import AgentReview
 from sql_da.cli import main
 from sql_da.config import ProjectConfig
 from sql_da.lineage import LineageGraph
@@ -12,7 +13,7 @@ from sql_da.reward import RewardCheck, _keyword_failures, run_quality_gates, run
 from sql_da.synthetic import init_demo_database
 from sql_da.terminal import TerminalReporter, print_json
 from sql_da.variance import compute_variances
-from sql_da.workflow import analyze
+from sql_da.workflow import _cost_output_summary, analyze
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,6 +42,8 @@ def test_workflow_writes_markdown_and_json(monkeypatch):
     assert trace_csv.exists()
     assert result.to_dict()["run_id"] == "pytest_report"
     assert result.to_dict()["trace_csv_path"] == str(trace_csv)
+    assert result.to_dict()["llm_cost_estimate"]["status"] == "skipped"
+    assert result.to_dict()["llm_cost_estimate"]["total_cost_usd"] == 0.0
     report_text = report.read_text(encoding="utf-8")
     assert "Financial Variance Root-Cause Report" in report_text
     assert "Data Quality Findings" in report_text
@@ -52,6 +55,7 @@ def test_workflow_writes_markdown_and_json(monkeypatch):
     }
     assert any(event["phase"] == "driver_research" for event in trace_payload)
     assert any(event["phase"] == "data_quality" for event in trace_payload)
+    assert any(event["action"] == "estimate llm cost" for event in trace_payload)
     with trace_csv.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["sequence"] == "1"
@@ -196,6 +200,57 @@ report_dir: {tmp_path / "reports"}
         analyze(bad_config, "2026-03", "2026-02")
 
 
+def test_workflow_records_streamed_live_agent_steps_once(monkeypatch):
+    config = _config()
+    init_demo_database(config)
+
+    def fake_run_agent_review(
+        model,
+        toolkit,
+        findings,
+        data_quality_findings=None,
+        agent_context=None,
+        on_step=None,
+    ):
+        step = {
+            "actor": "assistant",
+            "action": "agent message",
+            "output_summary": "streamed review step",
+        }
+        if on_step:
+            on_step(step)
+        return AgentReview(
+            enabled=True,
+            content="review complete",
+            research_steps=[step],
+            token_usage={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cached_input_tokens": 0,
+            },
+            cost_estimate={
+                "status": "estimated",
+                "total_cost_usd": 0.00011,
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+        )
+
+    monkeypatch.setattr("sql_da.workflow.run_agent_review", fake_run_agent_review)
+
+    result = analyze(config, "2026-03", "2026-02", run_id="streamed_agent")
+    trace_payload = json.loads(Path(result.trace_json_path).read_text(encoding="utf-8"))
+
+    assert result.agent_review == "review complete"
+    assert result.llm_cost_estimate["total_cost_usd"] == 0.00011
+    assert sum(event["output_summary"] == "streamed review step" for event in trace_payload) == 1
+    assert _cost_output_summary({"status": "unavailable"}) == (
+        "LLM cost estimate unavailable (unavailable)"
+    )
+
+
 def test_cli_commands(monkeypatch, capsys):
     monkeypatch.setenv("GOOGLE_API_KEY", "")
 
@@ -234,10 +289,46 @@ def test_cli_commands(monkeypatch, capsys):
     assert (
         main(
             [
+                "analyze",
+                "--config",
+                str(ROOT / "configs/demo.yaml"),
+                "--period",
+                "2026-03",
+                "--compare-to",
+                "2026-02",
+                "--run-id",
+                "cli_verbose",
+                "--verbose",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert '"run_id": "cli_verbose"' not in captured.out
+    assert "Analysis complete" in captured.err
+
+    assert (
+        main(
+            [
                 "reward",
                 "--config",
                 str(ROOT / "configs/demo.yaml"),
                 "--verbose",
+                "--skip-quality-gates",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert '"passed": true' not in captured.out
+    assert "Reward passed" in captured.err
+
+    assert (
+        main(
+            [
+                "reward",
+                "--config",
+                str(ROOT / "configs/demo.yaml"),
                 "--skip-quality-gates",
             ]
         )
@@ -260,6 +351,45 @@ def test_rich_reporter_and_json_output(capsys):
             "action": "trace event",
             "status": "ok",
             "output_summary": "done",
+        }
+    )
+    reporter.trace_event(
+        {
+            "phase": "live_agent",
+            "actor": "assistant",
+            "action": "tool call",
+            "tool": "get_metric_drivers",
+            "status": "ok",
+            "input_summary": {"metric": "revenue"},
+            "output_summary": "",
+        }
+    )
+    reporter.trace_event(
+        {
+            "phase": "live_agent",
+            "actor": "tool",
+            "action": "tool result",
+            "tool": "get_metric_drivers",
+            "status": "ok",
+            "output_summary": "x" * 180,
+        }
+    )
+    reporter.trace_event(
+        {
+            "phase": "live_agent",
+            "actor": "assistant",
+            "action": "agent message",
+            "status": "error",
+            "output_summary": "refining narrative",
+        }
+    )
+    reporter.trace_event(
+        {
+            "phase": "live_agent",
+            "actor": "workflow",
+            "action": "estimate llm cost",
+            "status": "unavailable",
+            "metadata": {},
         }
     )
     reporter.trace_table(
