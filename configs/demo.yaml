@@ -7,6 +7,7 @@ model:
   name: google_genai:gemini-3-flash-preview
   temperature: 0.0
   enable_live_agent: true
+  args: {}
 agent:
   memory_paths:
     - memory/AGENTS.md

@@ -27,6 +27,7 @@ class ModelConfig:
     name: str = DEFAULT_MODEL
     temperature: float = 0.0
     enable_live_agent: bool = True
+    args: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class ProjectConfig:
             db_uri = f"sqlite:///{db_path}"
 
         model_raw = raw.get("model", {})
+        model_args = _model_args(model_raw.get("args", {}))
         agent_raw = raw.get("agent", {})
         analysis_raw = raw.get("analysis", {})
         reward_raw = raw.get("reward", {})
@@ -105,6 +107,7 @@ class ProjectConfig:
             name=os.getenv("SQL_DA_MODEL", model_raw.get("name", DEFAULT_MODEL)),
             temperature=float(model_raw.get("temperature", 0.0)),
             enable_live_agent=bool(model_raw.get("enable_live_agent", True)),
+            args=model_args,
         )
         analysis = AnalysisConfig(
             materiality_abs=float(analysis_raw.get("materiality_abs", 5000.0)),
@@ -168,6 +171,14 @@ def _resolve_path(project_root: Path, value: str | Path) -> Path:
     return (project_root / path).resolve()
 
 
+def _model_args(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("model.args must be a mapping of ChatGoogleGenerativeAI keyword arguments")
+    return dict(value)
+
+
 def config_to_dict(config: ProjectConfig) -> dict[str, Any]:
     """Return a serializable subset of config values for report metadata."""
 
@@ -177,6 +188,8 @@ def config_to_dict(config: ProjectConfig) -> dict[str, Any]:
         "lineage_path": str(config.lineage_path),
         "report_dir": str(config.report_dir),
         "model": config.model.name,
+        "model_temperature": config.model.temperature,
+        "model_args": config.model.args,
         "agent_memory_paths": [str(path) for path in config.agent.memory_paths],
         "agent_skill_paths": [str(path) for path in config.agent.skill_paths],
         "materiality_abs": config.analysis.materiality_abs,

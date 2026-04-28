@@ -19,12 +19,15 @@ def test_config_resolves_paths_and_defaults(monkeypatch):
     assert config.database.uri == f"sqlite:///{ROOT / 'data/demo_finance.db'}"
     assert config.lineage_path == ROOT / "configs/lineage.yaml"
     assert config.model.name == DEFAULT_MODEL
+    assert config.model.args == {}
     assert config.agent.memory_paths == (ROOT / "memory/AGENTS.md",)
     assert config.agent.skill_paths == (ROOT / "skills",)
     assert config.analysis.materiality_abs == 5000.0
     config_dict = config_to_dict(config)
     assert "revenue" in config_dict["metrics"]
     assert str(ROOT / "skills") in config_dict["agent_skill_paths"]
+    assert config_dict["model_temperature"] == 0.0
+    assert config_dict["model_args"] == {}
 
 
 def test_config_honors_model_env_override(monkeypatch):
@@ -33,6 +36,58 @@ def test_config_honors_model_env_override(monkeypatch):
     config = ProjectConfig.from_yaml(ROOT / "configs/demo.yaml")
 
     assert config.model.name == "google_genai:custom"
+
+
+def test_config_loads_chat_google_genai_args(tmp_path, monkeypatch):
+    monkeypatch.delenv("SQL_DA_MODEL", raising=False)
+    config_path = tmp_path / "demo.yaml"
+    config_path.write_text(
+        """
+model:
+  name: google_genai:gemini-3-flash-preview
+  temperature: 0.1
+  args:
+    top_p: 0.9
+    top_k: 32
+    max_tokens: 2048
+    request_timeout: 90
+database:
+  path: demo.db
+lineage_path: lineage.yaml
+report_dir: reports
+""",
+        encoding="utf-8",
+    )
+
+    config = ProjectConfig.from_yaml(config_path)
+
+    assert config.model.temperature == 0.1
+    assert config.model.args == {
+        "top_p": 0.9,
+        "top_k": 32,
+        "max_tokens": 2048,
+        "request_timeout": 90,
+    }
+    assert config_to_dict(config)["model_args"]["max_tokens"] == 2048
+
+
+def test_config_rejects_non_mapping_model_args(tmp_path):
+    config_path = tmp_path / "demo.yaml"
+    config_path.write_text(
+        """
+model:
+  args:
+    - top_p
+database:
+  path: demo.db
+lineage_path: lineage.yaml
+report_dir: reports
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"model\.args must be a mapping"):
+        ProjectConfig.from_yaml(config_path)
 
 
 def test_load_env_file_does_not_override_existing_env(tmp_path, monkeypatch):

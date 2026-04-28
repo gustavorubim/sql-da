@@ -91,6 +91,7 @@ def create_variance_agent(
     try:
         from deepagents import create_deep_agent
         from langchain_core.tools import tool
+        from langchain_google_genai import ChatGoogleGenerativeAI
     except ImportError as exc:  # pragma: no cover - exercised only without optional deps
         raise AgentUnavailable(str(exc)) from exc
 
@@ -148,7 +149,7 @@ def create_variance_agent(
     skill_sources = list(agent_context.skill_sources) if agent_context else []
     memory_sources = list(agent_context.memory_sources) if agent_context else []
     return create_deep_agent(
-        model=model.name,
+        model=ChatGoogleGenerativeAI(**chat_google_genai_kwargs(model)),
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
         subagents=build_subagents(agent_context.skill_sources if agent_context else ()),
@@ -169,6 +170,15 @@ def build_subagents(skill_sources: tuple[str, ...] = ()) -> list[dict[str, Any]]
         }
         for name, description, system_prompt in SUBAGENTS
     ]
+
+
+def chat_google_genai_kwargs(model: ModelConfig) -> dict[str, Any]:
+    """Build ChatGoogleGenerativeAI keyword arguments from project config."""
+
+    kwargs = dict(model.args)
+    kwargs.setdefault("temperature", model.temperature)
+    kwargs["model"] = _normalize_model_name(model.name)
+    return kwargs
 
 
 def run_agent_review(

@@ -15,6 +15,8 @@ from sql_da.agent import (
     _response_candidate,
     _tool_name,
     build_subagents,
+    chat_google_genai_kwargs,
+    create_variance_agent,
     estimate_llm_cost,
     extract_agent_token_usage,
     run_agent_review,
@@ -123,6 +125,48 @@ def test_agent_context_loads_memory_and_skills():
         "report-reviewer",
     }
     assert all(subagent["skills"] == ["/skills"] for subagent in subagents)
+
+
+def test_gemini_model_kwargs_and_agent_creation(monkeypatch):
+    toolkit = _toolkit()
+    captured = {}
+
+    class FakeChatGoogleGenerativeAI:
+        def __init__(self, **kwargs):
+            captured["chat_kwargs"] = kwargs
+
+    def fake_create_deep_agent(**kwargs):
+        captured["deep_agent_kwargs"] = kwargs
+        return "agent"
+
+    import deepagents
+    import langchain_google_genai
+
+    monkeypatch.setattr(
+        langchain_google_genai, "ChatGoogleGenerativeAI", FakeChatGoogleGenerativeAI
+    )
+    monkeypatch.setattr(deepagents, "create_deep_agent", fake_create_deep_agent)
+
+    model = ModelConfig(
+        name="google_genai:gemini-3-flash-preview",
+        temperature=0.2,
+        args={
+            "top_p": 0.95,
+            "request_timeout": 120,
+            "temperature": 0.4,
+            "model": "ignored-model-from-args",
+        },
+    )
+
+    assert chat_google_genai_kwargs(model) == {
+        "model": "gemini-3-flash-preview",
+        "temperature": 0.4,
+        "top_p": 0.95,
+        "request_timeout": 120,
+    }
+    assert create_variance_agent(model, toolkit) == "agent"
+    assert captured["chat_kwargs"] == chat_google_genai_kwargs(model)
+    assert captured["deep_agent_kwargs"]["model"].__class__ is FakeChatGoogleGenerativeAI
 
 
 def test_agent_review_uses_fake_agent_when_key_present(monkeypatch):

@@ -21,6 +21,22 @@ SQL_DA_MODEL=google_genai:gemini-3-flash-preview
 
 The default Gemini development model is `google_genai:gemini-3-flash-preview`. The underlying Gemini API model code is `gemini-3-flash-preview`.
 
+Customize LangChain `ChatGoogleGenerativeAI` construction in `configs/demo.yaml` under `model.args`. The top-level `model.name` remains the model id and `model.temperature` remains the default temperature unless `model.args.temperature` is set:
+
+```yaml
+model:
+  name: google_genai:gemini-3-flash-preview
+  temperature: 0.0
+  enable_live_agent: true
+  args:
+    top_p: 0.95
+    top_k: 40
+    max_tokens: 4096
+    request_timeout: 120
+    retries: 3
+    thinking_budget: 1024
+```
+
 LLM cost estimates use the Gemini API paid-tier standard text token rates for `gemini-3-flash-preview` from the [Google AI for Developers pricing page](https://ai.google.dev/gemini-api/docs/pricing), last updated there on 2026-04-22: $0.50 per 1M input tokens, $3.00 per 1M output tokens, and $0.05 per 1M cached input tokens. Estimates depend on provider token metadata and exclude free-tier credits, taxes, and non-token tool fees.
 
 ## Run The Demo
